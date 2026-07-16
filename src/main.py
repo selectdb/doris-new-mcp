@@ -24,6 +24,7 @@ def main() -> None:
         transport="streamable-http",
         host=cfg.mcp.host,
         port=cfg.mcp.port,
+        stateless_http=True,
         middleware=[Middleware(RequestLoggerMiddleware), Middleware(CharsetMiddleware)],
     )
 
