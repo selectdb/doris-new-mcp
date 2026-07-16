@@ -61,9 +61,12 @@ _detect_native() {
     echo "${os}-${arch}"
 }
 
-# ═════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 # _ensure_python — 确保 python/ 有 Python 3.10 + 全部依赖
-# ═════════════════════════════════════════════════════════════════════════
+#
+# 优先使用 DORIS_MCP_SYSTEM_PYTHON 指向的已有 Python（如 conda）
+# 然后尝试下载 python-build-standalone
+# ════════════════════════════════════════════════════════════════════
 _ensure_python() {
     local platform="$1"
 
@@ -72,10 +75,46 @@ _ensure_python() {
         return 0
     fi
     if [ -d "$PYTHON_DIR" ]; then
-        _warn "Python not runnable on this platform, re-downloading..."
+        _warn "Python not runnable on this platform, re-creating..."
         rm -rf "$PYTHON_DIR"
     fi
 
+    # ── Fallback 1: use system/conda Python if provided ──
+    if [ -n "${DORIS_MCP_SYSTEM_PYTHON:-}" ] && [ -x "$DORIS_MCP_SYSTEM_PYTHON" ]; then
+        _info "Using system Python: $DORIS_MCP_SYSTEM_PYTHON"
+        local py_ver
+        py_ver=$("$DORIS_MCP_SYSTEM_PYTHON" --version 2>&1)
+        _info "Python version: $py_ver"
+        
+        # Copy real Python files into python/ dir (no symlinks)
+        local py_root
+        py_root=$(cd $(dirname $(dirname "$DORIS_MCP_SYSTEM_PYTHON")) && pwd)
+        _info "Copying Python from $py_root to $PYTHON_DIR ..."
+        rm -rf "$PYTHON_DIR"
+        mkdir -p "$PYTHON_DIR"
+        
+        # Copy bin/
+        cp -a "$py_root/bin/" "$PYTHON_DIR/bin/"
+        # Copy lib/ (excluding heavy test/tkinter/idlelib)
+        mkdir -p "$PYTHON_DIR/lib"
+        for item in "$py_root/lib/"python* "$py_root/lib/"lib*.so*; do
+            [ -e "$item" ] && cp -a "$item" "$PYTHON_DIR/lib/" 2>/dev/null || true
+        done
+        
+        if [ ! -x "$PYTHON_DIR/bin/python3" ]; then
+            _error "Failed to setup Python at $PYTHON_DIR/bin/python3"
+            exit 1
+        fi
+        _info "Python $("$PYTHON_DIR/bin/python3" --version) ready"
+        
+        _info "Installing dependencies ..."
+        "$PYTHON_DIR/bin/python3" -m pip install --quiet --upgrade pip 2>/dev/null || true
+        "$PYTHON_DIR/bin/python3" -m pip install --quiet -r "$REQUIREMENTS"
+        _info "Dependencies installed."
+        return 0
+    fi
+
+    # ── Fallback 2: download python-build-standalone ──
     local tarball_name="cpython-${PY_VERSION}+${PY_STANDALONE_RELEASE}-${platform}-install_only_stripped.tar.gz"
     local url="https://github.com/astral-sh/python-build-standalone/releases/download/${PY_STANDALONE_RELEASE}/${tarball_name}"
 
@@ -86,9 +125,17 @@ _ensure_python() {
 
     local tarball="$tmp_dir/$tarball_name"
     if command -v curl > /dev/null 2>&1; then
-        curl -fsSL --progress-bar -o "$tarball" "$url"
+        curl -fsSL --connect-timeout 30 --max-time 600 -o "$tarball" "$url" || {
+            _error "Download failed: $url"
+            _error "Tip: set DORIS_MCP_SYSTEM_PYTHON=/path/to/python3.10 to use a local Python"
+            exit 1
+        }
     elif command -v wget > /dev/null 2>&1; then
-        wget -q --show-progress -O "$tarball" "$url"
+        wget -q --timeout=30 --tries=3 -O "$tarball" "$url" || {
+            _error "Download failed: $url"
+            _error "Tip: set DORIS_MCP_SYSTEM_PYTHON=/path/to/python3.10 to use a local Python"
+            exit 1
+        }
     else
         _error "Need curl or wget"
         exit 1
@@ -96,7 +143,7 @@ _ensure_python() {
 
     if [ ! -f "$tarball" ] || [ ! -s "$tarball" ]; then
         _error "Download failed: $url"
-        _error "Check PY_STANDALONE_RELEASE / PY_VERSION"
+        _error "Tip: set DORIS_MCP_SYSTEM_PYTHON=/path/to/python3.10 to use a local Python"
         exit 1
     fi
 

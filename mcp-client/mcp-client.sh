@@ -1,1 +1,1 @@
-mcp-client.sh
+../mcp-client.sh
