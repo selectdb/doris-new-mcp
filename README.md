@@ -92,17 +92,6 @@ bash test/run_all_tests.sh --smoke
 bash test/run_all_tests.sh
 ```
 
-## 依赖修复
-
-原始 `requirements.txt` 缺少 4 个 MetricFlow 传递依赖，已补充：
-
-| 依赖 | 用途 |
-|------|------|
-| `jinja2` | 模板引擎 |
-| `rapidfuzz` | 模糊匹配 |
-| `python-dateutil` | 时间计算 |
-| `tabulate` | 表格格式化 |
-
 ## 文档
 
 - [DESIGN.md](DESIGN.md) — 架构设计文档
