@@ -1,38 +1,38 @@
-# DESIGN.md — doris-mcp-server
+# DESIGN.md — doris-mcp-server 设计文档
 
-## Overview
+## 概述
 
-**doris-mcp-server** is an MCP (Model Context Protocol) server that wraps Apache Doris with a semantic metric layer powered by **MetricFlow v0.209.0**. It exposes Doris as an AI-queryable data source via FastMCP's streamable HTTP transport, supports multi-tenancy via workspaces, and includes a built-in Web UI and CLI for semantic model management.
+**doris-mcp-server** 是一个基于 MCP（Model Context Protocol）协议的 Apache Doris 查询服务。它通过 FastMCP 的 streamable-http 传输层对外暴露 Doris 的数据查询能力，内置基于 MetricFlow v0.209.0 的语义指标层，支持多工作区隔离，并提供 Web UI 和 CLI 两套管理界面。
 
 ```
-                         MCP Protocol (streamable-http, stateless)
+                         MCP 协议（streamable-http, 无状态）
 ┌──────────────────────────────────────────────────────────────────┐
-│                        AI Client (LLM)                           │
-│    Claude Desktop / Cursor / VeloDB / Codex / custom client      │
+│                       AI 客户端（LLM）                           │
+│    Claude Desktop / Cursor / VeloDB / Codex / 自定义客户端       │
 └─────────────────────────────┬────────────────────────────────────┘
                               │
                               ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     FastMCP 3.3.1 Server                         │
+│                     FastMCP 3.3.1 服务器                         │
 │                                                                  │
 │  ┌───────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │  10 MCP Tools │  │  Web UI      │  │  REST API              │ │
-│  │  (LLM-facing) │  │  /mcp/web/*  │  │  /mcp/web/semantic/*   │ │
+│  │  10 个 Tool   │  │  Web UI      │  │  REST API              │ │
+│  │  (LLM 调用)   │  │  /mcp/web/*  │  │  /mcp/web/semantic/*   │ │
 │  └───────┬───────┘  └──────┬───────┘  └───────────┬────────────┘ │
 │          │                 │                       │              │
 │  ┌───────┴─────────────────┴───────────────────────┴────────────┐ │
-│  │                      Auth Layer                              │ │
+│  │                       认证层                                  │ │
 │  │  MCP:  Bearer username:password → CredentialVerifier → Doris │ │
-│  │  Web:  Session cookie (24h TTL, httponly)                    │ │
-│  │  Cache: 10-min in-memory credential cache                    │ │
-│  │  Pool: Per-user aiomysql connection pools                    │ │
+│  │  Web:  会话 Cookie（24h TTL, httponly）                      │ │
+│  │  缓存: 10 分钟内存凭证缓存                                    │ │
+│  │  连接: 每用户独立 aiomysql 连接池                             │ │
 │  └───────────────────────────┬──────────────────────────────────┘ │
 │                              │                                    │
 │  ┌───────────────────────────┴──────────────────────────────────┐ │
-│  │                 Multi-Workspace Watcher                       │ │
-│  │  Per-workspace: Store → Manifest → Compiler (MetricFlow)     │ │
-│  │  60s polling for change detection                             │ │
-│  │  Auto-discover new/deleted workspaces                         │ │
+│  │                   多工作区管理器                               │ │
+│  │  每工作区: Store → Manifest → Compiler (MetricFlow)          │ │
+│  │  60s 轮询检测变更                                              │ │
+│  │  自动发现新增/删除的工作区                                     │ │
 │  │  MetricRouter: metric_name → (compiler, workspace)           │ │
 │  └───────────────────────────┬──────────────────────────────────┘ │
 └──────────────────────────────┼────────────────────────────────────┘
@@ -42,239 +42,239 @@
                     │   Apache Doris FE   │
                     │   127.0.0.1:9030    │
                     │                     │
-                    │  system_mcp.*       │  ← workspace storage
-                    │  dw.*               │  ← user data tables
+                    │  system_mcp.*       │  ← 工作区存储
+                    │  dw.*               │  ← 用户数据表
                     └─────────────────────┘
 ```
 
 ---
 
-## 1. Entry Point & Lifecycle
+## 1. 入口与生命周期
 
-### 1.1 Startup (`src/main.py`)
+### 1.1 启动流程 (`src/main.py`)
 
 ```
 main()
-  ├─ parse args (--config-dir, --env-file)
-  ├─ AppConfig.load(mcp-server.toml)   ← TOML with ${VAR} env interpolation
+  ├─ 解析参数 (--config-dir, --env-file)
+  ├─ AppConfig.load(mcp-server.toml)   ← TOML 配置文件，支持 ${VAR} 环境变量插值
   └─ create_server()
-       ├─ seed_example_data()          ← if seed_example=true (default)
-       ├─ MultiWorkspaceWatcher.start() ← background poll thread (60s)
-       ├─ ConnectionPool (admin)       ← aiomysql, min=0, max=10
-       ├─ CredentialVerifier           ← Bearer token → Doris verification
-       ├─ register 10 MCP tools
-       ├─ register Web UI routes (/mcp/web/*)
-       └─ register REST API routes (/mcp/web/semantic/*, /mcp/web/staging/*)
+       ├─ seed_example_data()          ← 若 seed_example=true（默认开启）
+       ├─ MultiWorkspaceWatcher.start() ← 后台轮询线程（60s 间隔）
+       ├─ ConnectionPool (admin)       ← aiomysql 连接池，min=0, max=10
+       ├─ CredentialVerifier           ← Bearer token → Doris 凭据验证
+       ├─ 注册 10 个 MCP Tool
+       ├─ 注册 Web UI 路由 (/mcp/web/*)
+       └─ 注册 REST API 路由 (/mcp/web/semantic/*, /mcp/web/staging/*)
            ↓
 mcp.run(transport="streamable-http", stateless_http=True, port=3000)
 ```
 
-### 1.2 Shutdown
+### 1.2 关闭
 
-Lifespan context manager closes all connection pools (`pool_manager.close_all()`, `admin_pool.close()`).
+`lifespan` 上下文管理器在服务器关闭时释放所有连接池。
 
 ---
 
-## 2. Configuration (`src/config/loader.py`)
+## 2. 配置 (`src/config/loader.py`)
 
 ### 2.1 `mcp-server.toml`
 
 ```toml
 [server]
-mcp_name = "doris-new-mcp"      # MCP server name
-mcp_host = "0.0.0.0"            # Bind address
-mcp_port = 3000                 # HTTP port
-fe_port = 9030                  # Doris FE MySQL port (localhost)
-seed_example = true             # Auto-create example workspace
+mcp_name = "doris-new-mcp"      # MCP 服务名称
+mcp_host = "0.0.0.0"            # 监听地址
+mcp_port = 3000                 # HTTP 端口
+fe_port = 9030                  # Doris FE MySQL 端口（同机 127.0.0.1）
+seed_example = true             # 首次启动自动创建示例工作区
 
 [logging]
 level = "info"                  # debug|info|warning|error
-audit_log = "./logs/audit.log"  # Audit log path
-rotation_when = "midnight"      # Log rotation policy
-rotation_backup_count = 30      # Retention count
+audit_log = "./logs/audit.log"  # 审计日志路径
+rotation_when = "midnight"      # 按天轮转
+rotation_backup_count = 30      # 保留 30 天
 
 [query]
 pool_min_size = 0
 pool_max_size = 10
 pool_idle_timeout_seconds = 300
 query_timeout_seconds = 600
-query_max_rows = 10000           # Default row limit
+query_max_rows = 10000           # 默认最大返回行数
 ```
 
-### 2.2 Config Classes
+### 2.2 配置类
 
-| Class | Responsibility |
-|-------|---------------|
-| `AppConfig` | TOML/YAML loading, `${VAR}` env interpolation via regex |
-| `McpConfig` | Server identity, host/port, logging, seed flag |
-| `ClusterConfig` | Doris FE connection, pool sizing, query limits, DB whitelist |
+| 类 | 职责 |
+|---|------|
+| `AppConfig` | 顶层，加载 TOML/YAML，正则替换 `${VAR}` 环境变量 |
+| `McpConfig` | 服务名称、地址端口、日志配置、种子开关 |
+| `ClusterConfig` | Doris FE 连接、连接池参数、查询限制、库白名单 |
 
 ---
 
-## 3. MCP Tools (10 total)
+## 3. MCP Tool（共 10 个）
 
-### 3.1 Tool Catalog
+### 3.1 Tool 清单
 
-| # | Tool | Annotations | Role |
-|---|------|------------|------|
-| 1 | `get_query_guide` | readOnly, idempotent | **First call.** Returns complete workflow guide for AI clients. |
-| 2 | `check_service_health` | readOnly, idempotent | **Second call.** Doris connectivity + per-workspace status + metric counts. |
-| 3 | `list_metrics` | readOnly, idempotent | List all metrics in a workspace (name + description). |
-| 4 | `list_dimensions_for_metric` | readOnly, idempotent | Valid `group_by` dimensions for a given metric. |
-| 5 | `query_metric` | readOnly | **Primary query tool.** Compile via MetricFlow → execute SQL. Supports `metrics`, `group_by`, `where`, `order_by`, `limit`, `having`, `database`, `max_rows`. |
-| 6 | `list_databases` | readOnly, idempotent | List Doris databases (paginated). |
-| 7 | `list_tables` | readOnly, idempotent | List tables in a database (with `like` filter, paginated). |
-| 8 | `describe_table` | readOnly, idempotent | Table schema (`names`/`summary`/`full` detail levels). |
-| 9 | `execute_query` | readOnly | Raw SQL fallback (read-only: SELECT/SHOW/DESCRIBE/EXPLAIN). |
-| 10 | `reload_semantic_layer` | idempotent | Trigger async workspace reload. |
+| # | Tool | 标注 | 用途 |
+|---|------|------|------|
+| 1 | `get_query_guide` | 只读, 幂等 | **第一步必调**。返回完整工作流指引，告知 AI 何时用语义层、何时用裸 SQL、工具调用顺序。 |
+| 2 | `check_service_health` | 只读, 幂等 | **第二步必调**。Doris 连通性 + 每工作区状态 + 指标数量。 |
+| 3 | `list_metrics` | 只读, 幂等 | 列出某工作区所有指标（名称+描述）。 |
+| 4 | `list_dimensions_for_metric` | 只读, 幂等 | 返回某指标的可用 `group_by` 维度。 |
+| 5 | `query_metric` | 只读 | **核心查询工具**。MetricFlow 编译 → 执行 SQL。支持 `metrics`/`group_by`/`where`/`order_by`/`limit`/`having`/`database`/`max_rows`。 |
+| 6 | `list_databases` | 只读, 幂等 | 列出 Doris 数据库（分页）。 |
+| 7 | `list_tables` | 只读, 幂等 | 列出某库的表（支持 `like` 模糊匹配，分页）。 |
+| 8 | `describe_table` | 只读, 幂等 | 表结构（`names`/`summary`/`full` 三级详细程度）。 |
+| 9 | `execute_query` | 只读 | 裸 SQL 兜底路径（仅允许 SELECT/SHOW/DESCRIBE/EXPLAIN）。 |
+| 10 | `reload_semantic_layer` | 幂等 | 手动触发工作区重载。 |
 
-### 3.2 Agent-Side Workflow
+### 3.2 Agent 端工作流
 
-The system enforces a strict calling order for AI clients:
+系统对 AI 客户端强制执行严格的调用顺序：
 
 ```
-get_query_guide()                    ← Step 1: learn the workflow
+get_query_guide()                    ← 第 1 步：获取工作流指引
     ↓
-check_service_health()               ← Step 2: check Doris + workspace status
+check_service_health()               ← 第 2 步：检查 Doris 和工作区状态
     ↓
-    ├─ semantic layer healthy? ──→ list_metrics() → list_dimensions_for_metric() → query_metric()
-    │                              (the "happy path" — counts, sums, rates, trends)
+    ├─ 语义层 healthy？ ──→ list_metrics() → list_dimensions_for_metric() → query_metric()
+    │                      （常规路径：计数、求和、比率、排名、趋势）
     │
-    └─ semantic layer unavailable or no matching metric?
+    └─ 语义层不可用 或 无匹配指标？
         └─→ list_databases() → list_tables() → describe_table() → execute_query()
-            (the "fallback path" — raw SQL with metadata discovery)
+            （兜底路径：裸 SQL + 元数据发现）
 ```
 
-**Key rule:** If the semantic layer is healthy and a metric matches the user's intent, `execute_query` must NOT be used. Always prefer `query_metric`.
+**关键规则：** 语义层 healthy 且有匹配指标时，绝不允许绕过 `query_metric` 直接用 `execute_query`。
 
-### 3.3 Tool Implementation Pattern
+### 3.3 Tool 实现模式
 
-Every tool follows the same structure:
+所有 Tool 遵循统一结构：
 
 ```python
 @mcp.tool(annotations=ToolAnnotations(...))
 async def tool_name(param: type, ...) -> str:
-    auth = check_tool_access("tool_name")     # 1. Auth gate
+    auth = check_tool_access("tool_name")     # 1. 鉴权
     if auth.denied: return auth.denied
-    start = time.monotonic()                  # 2. Start timer
-    pool = await _get_per_user_pool(auth.pool) # 3. Resolve connection pool
-    result = await _implementation(pool, ...)  # 4. Execute
-    log_tool_call("tool_name", ..., duration_ms=...) # 5. Audit log
+    start = time.monotonic()                  # 2. 计时
+    pool = await _get_per_user_pool(auth.pool) # 3. 获取连接池
+    result = await _implementation(pool, ...)  # 4. 执行
+    log_tool_call("tool_name", ..., duration_ms=...) # 5. 审计
     return result
 ```
 
-All results are JSON-serialized via `success_response()` / `error_response()`.
+所有结果通过 `success_response()` / `error_response()` 序列化为 JSON。
 
 ---
 
-## 4. Authentication & Authorization
+## 4. 认证与授权
 
-### 4.1 MCP Protocol Auth
+### 4.1 MCP 协议认证
 
 ```
 Authorization: Bearer username:password
 ```
 
-| Step | Component | Action |
-|------|-----------|--------|
-| 1 | `CredentialVerifier.verify_token()` | Split `username:password` on first `:` |
-| 2 | `CredentialCache` | Check 10-min TTL cache |
-| 3 | `pymysql.connect(host=<machine_ip>, user, password)` | Verify against Doris |
-| 4 | Valid → cache → return `AccessToken` | |
-| 5 | Invalid → return 401 | |
+| 步骤 | 组件 | 操作 |
+|------|------|------|
+| 1 | `CredentialVerifier.verify_token()` | 取第一个 `:` 分割 username 和 password |
+| 2 | `CredentialCache` | 查询 10 分钟 TTL 内存缓存 |
+| 3 | `pymysql.connect(host=<机器IP>, user, password)` | 对 Doris 验证凭据 |
+| 4 | 有效 → 缓存 → 返回 `AccessToken` | |
+| 5 | 无效 → 返回 401 | |
 
-The machine IP used for verification is the **non-127.0.0.1** IP (detected via UDP socket to 8.8.8.8), ensuring Doris uses real user identity.
+验证时使用机器**非 127.0.0.1 的真实 IP**（通过 UDP 连接 8.8.8.8 探测），确保 Doris 侧使用真实用户身份。
 
-### 4.2 Web UI Auth
+### 4.2 Web UI 认证
 
 ```
-GET  /mcp/web/login  → render login form
-POST /mcp/web/login  → verify Doris credentials → set "doris_mcp_session" cookie
-                       (24h TTL, httponly, samesite=lax)
-GET  /mcp/web/logout → clear session + cookie
+GET  /mcp/web/login  → 渲染登录表单
+POST /mcp/web/login  → 验证 Doris 凭据 → 设置 "doris_mcp_session" Cookie
+                       （24h TTL, httponly, samesite=lax）
+GET  /mcp/web/logout → 清除会话和 Cookie
 ```
 
-### 4.3 Authorization Model
+### 4.3 权限模型
 
-| Role | How determined | Permissions |
-|------|---------------|-------------|
-| **admin** | `user == "admin"` | Full: push/pull/validate/commit/discard models, create/delete workspaces, execute any SQL |
-| **authenticated user** | Valid Bearer token with `_check_semantic_access()` | Read: view models, list/query metrics, execute SQL (read-only validation) |
-| **unauthenticated** | No token | Rejected (401 or redirect to login) |
+| 角色 | 判定方式 | 权限 |
+|------|----------|------|
+| **admin** | `user == "admin"` | 全部：上传/拉取/验证/提交/丢弃模型、创建/删除工作区、执行任意 SQL |
+| **已认证用户** | 有效 Bearer token，通过 `_check_semantic_access()` | 只读：查看模型、列出/查询指标、执行 SQL（只读校验） |
+| **未认证** | 无 token | 拒绝（401 或跳转登录页） |
 
-### 4.4 Per-User Connection Pools
+### 4.4 每用户连接池
 
-Each authenticated user gets a separate `aiomysql` pool connected via the machine's non-loopback IP. This ensures proper Doris user-level authorization. On auth failure, the credential cache is cleared so next request re-verifies.
+每个已认证用户获得独立的 `aiomysql` 连接池，通过机器非 loopback IP 连接。确保 Doris 侧正确应用用户级别授权。认证失败时自动清除凭证缓存，下次请求重新验证。
 
 ---
 
-## 5. Workspace System
+## 5. 工作区系统
 
-### 5.1 Concept
+### 5.1 概念
 
-A **workspace** is a logical tenant providing complete isolation:
+**工作区**是完全隔离的逻辑租户，包含：
 
-- Independent YAML model files
-- Independent MetricFlow compiler instance
-- Independent metric namespace
-- Independent Doris storage tables
+- 独立的 YAML 模型文件
+- 独立的 MetricFlow 编译器实例
+- 独立的指标命名空间
+- 独立的 Doris 存储表
 
-Workspace A's metrics are **completely invisible** to workspace B.
+工作区 A 的指标对工作区 B **完全不可见**。
 
-**Naming:** `^[a-zA-Z][a-zA-Z0-9_]*$`
+**命名规范：** `^[a-zA-Z][a-zA-Z0-9_]*$`
 
-### 5.2 Workspace States
+### 5.2 工作区三种状态
 
-| State | Meaning | Cause |
-|-------|---------|-------|
-| `healthy` | Normal operation, metrics queryable | YAML committed successfully, bootstrap passed, MetricFlow engine ready |
-| `no_models` | Empty workspace | New workspace, or all files deleted |
-| `not_ready` | Load failed | YAML syntax errors, missing tables, missing `project.yaml`, MetricFlow validation failure |
-
-```
-  no_models  ──upload YAML──→  not_ready  ──fix + commit──→  healthy
-      ↑                            ↑                              │
-      └──────────────────────── upload bad YAML ──────────────────┘
-```
-
-### 5.3 Storage Architecture (`src/store/store.py`)
-
-Each workspace has **two** Doris tables in `system_mcp` database:
+| 状态 | 含义 | 触发条件 |
+|------|------|----------|
+| `healthy` | 正常运行，指标可查询 | YAML 已提交成功，bootstrap 解析通过，MetricFlow 引擎就绪 |
+| `no_models` | 空工作区 | 新创建，或所有文件已删除 |
+| `not_ready` | 加载失败 | YAML 语法错误、表不存在、缺少 project.yaml、MetricFlow 校验失败 |
 
 ```
-system_mcp.active_store_{workspace}     ← production models (read-only)
+  no_models  ──上传 YAML──→  not_ready  ──修复+提交──→  healthy
+      ↑                            ↑                          │
+      └──────────────────────── 上传错误 YAML ────────────────┘
+```
+
+### 5.3 存储架构 (`src/store/store.py`)
+
+每个工作区在 `system_mcp` 库中有**两张** Doris 表：
+
+```
+system_mcp.active_store_{workspace}     ← 已生效的模型（只读）
   filename   VARCHAR(512) PRIMARY KEY
   updated_at DATETIME
   content    STRING
 
-system_mcp.staging_store_{workspace}    ← pending changes
+system_mcp.staging_store_{workspace}    ← 待提交的变更
   filename   VARCHAR(512) PRIMARY KEY
   action     VARCHAR(16)   -- 'upsert' | 'delete'
   updated_at DATETIME
-  content    STRING (NULL for delete)
+  content    STRING（delete 时为 NULL）
 ```
 
-### 5.4 Staging Workflow
+### 5.4 更新流程
 
 ```
-  User edits YAML (WebUI/CLI)
-          │
-          ▼
+  用户编辑 YAML（WebUI/CLI）
+           │
+           ▼
   ┌─────────────────┐
-  │  Staging Store  │   ← files enter here, no impact on running queries
+  │  Staging Store  │   ← 文件进入暂存区，不影响正在运行的查询
   └────────┬────────┘
            │
    ┌───────┼───────┐
    ▼       ▼       ▼
-Validate  Commit  Discard
+验证    提交    丢弃
    │       │       │
    │  ┌────┴────┐  │
    │  │ Active  │  │
    │  │ Store   │  │
    │  └────┬────┘  │
    │       │       │
-   │  Auto-reload  │
-   │  (2-5 sec)    │
+   │  自动重载     │
+   │  （2-5 秒）   │
    │       │       │
    ▼       ▼       ▼
   ┌─────────────┐
@@ -282,177 +282,177 @@ Validate  Commit  Discard
   └─────────────┘
 ```
 
-**Enforcement:** Commit is only allowed after a successful Validate. "Staging must be validated before commit."
+**强制约束：** 必须先验证才能提交。"Staging must be validated before commit."
 
-### 5.5 Validation Pipeline
+### 5.5 验证管道
 
 ```
 validate_staging(workspace)
-  1. staging_fetch()               → merge active + staging into temp dir
-  2. pre_validate_physical()       → YAML syntax, file structure, table existence
-  3. bootstrap()                   → MetricFlow build in temp workspace
-  4. SemanticManifest.load()       → parse generated semantic_manifest.json
-  5. _check_staging_duplicates()   → detect duplicate measures/models across files
-  6. Return (pass/fail, message, details with metric list)
+  1. staging_fetch()               → 合并 active + staging 到临时目录
+  2. pre_validate_physical()       → YAML 语法、文件结构、表存在性
+  3. bootstrap()                   → MetricFlow 构建到临时工作区
+  4. SemanticManifest.load()       → 解析生成的 semantic_manifest.json
+  5. _check_staging_duplicates()   → 跨文件检测重复度量/模型名
+  6. 返回 (通过/失败, 消息, 含指标列表的详情)
 ```
 
-### 5.6 Multi-Workspace Watcher (`src/store/watcher.py`)
+### 5.6 多工作区管理器 (`src/store/watcher.py`)
 
 ```
 MultiWorkspaceWatcher
-├─ _init_all()                ← scan system_mcp for active_store_* tables
-├─ _poll_loop()               ← background thread, 60s interval
-│   ├─ check_remote()         ← detect version changes via revision hash
+├─ _init_all()                ← 扫描 system_mcp 中的 active_store_* 表
+├─ _poll_loop()               ← 后台线程，60s 间隔
+│   ├─ check_remote()         ← 通过 revision hash 检测版本变化
 │   ├─ _reload_workspace()    ← fetch → bootstrap → manifest → compiler
-│   └─ discover new/stale     ← SCAN system_mcp for table changes
+│   └─ 发现新增/过期工作区     ← 扫描 system_mcp 中表的变化
 ├─ MetricRouter               ← metric_name → (compiler, workspace_name)
-├─ force_reload()             ← manual trigger (API/tool)
+├─ force_reload()             ← 手动触发重载（API/Tool）
 └─ commit_staging()           ← staging_commit() → force_reload()
 ```
 
-**Atomic swap:** `RWLock.write_acquire()` guards manifest/compiler replacement. No request sees partial state.
+**原子替换：** `RWLock.write_acquire()` 保护 manifest/compiler 的替换。任何请求都不会看到部分状态。
 
 ---
 
-## 6. Semantic Layer
+## 6. 语义层
 
-### 6.1 MetricFlow Integration (`src/store/compiler.py`)
+### 6.1 MetricFlow 集成 (`src/store/compiler.py`)
 
 ```
-YAML models (Doris active_store)
+YAML 模型（Doris active_store 中存储）
       │
       ▼
-  bootstrap()          ← MetricFlow build (dbt parse + manifest generation)
+  bootstrap()          ← MetricFlow 构建（dbt 解析 + manifest 生成）
       │
       ▼
   semantic_manifest.json
       │
-      ├── SemanticManifest.load()   ← metadata: metrics, dimensions, entities
+      ├── SemanticManifest.load()   ← 元数据：指标、维度、实体
       │
       └── MetricFlowCompiler
             │
-            ├── MetricFlowEngine (compile-only mode)
-            │     └── _DorisSqlClientStub  ← satisfies SqlClient interface
-            │           for dialect rendering, no actual queries
+            ├── MetricFlowEngine（仅编译模式）
+            │     └── _DorisSqlClientStub  ← 满足 SqlClient 接口要求
+            │           仅用于方言渲染，不执行真实查询
             │
-            └── query_metric() flow:
+            └── query_metric() 流程:
                   explain(sql) → Doris SQL → ConnectionPool.execute(sql) → rows
 ```
 
-### 6.2 Semantic Model Structure
+### 6.2 语义模型结构
 
-A `semantic_model` YAML document consists of:
+一个 `semantic_model` YAML 文档包含：
 
-| Section | Required | Purpose |
-|---------|----------|---------|
-| `name` | ✅ | Globally unique model name |
-| `db_table` | ✅ | Doris physical table (`db.table`) |
-| `defaults.agg_time_dimension` | ✅ | Default time dimension for metrics |
-| `entities` | ✅ | Primary/foreign/unique/natural keys |
-| `dimensions` | ✅ | Time dimensions (day/week/month/quarter/year/hour/minute) and categorical dimensions |
-| `measures` | Recommended | Aggregation definitions (sum/count/count_distinct/average/min/max/median/percentile/sum_boolean) |
-| `description` | Optional | Human-readable description |
-| `primary_entity` | Conditional | Required if no `type: primary` entity exists |
+| 字段 | 必填 | 说明 |
+|------|:--:|------|
+| `name` | ✅ | 全局唯一的模型名称 |
+| `db_table` | ✅ | Doris 物理表（`库.表`） |
+| `defaults.agg_time_dimension` | ✅ | 指标的默认时间维度 |
+| `entities` | ✅ | 主键/外键/唯一键/自然键 |
+| `dimensions` | ✅ | 时间维度（day/week/month/quarter/year/hour/minute）和分类维度 |
+| `measures` | 推荐 | 聚合定义（sum/count/count_distinct/average/min/max/median/percentile/sum_boolean） |
+| `description` | 可选 | 文字描述 |
+| `primary_entity` | 条件 | 当 entities 中没有 `type: primary` 时必填 |
 
-### 6.3 Advanced Metric Types
+### 6.3 高级指标类型
 
-Beyond auto-generated simple metrics from `measures`, YAML supports four advanced types:
+除 `measures` 自动生成的简单指标外，YAML 支持四种高级类型：
 
-| Type | Purpose | Example |
-|------|---------|---------|
-| `ratio` | numerator ÷ denominator | Conversion rate = orders / visits |
-| `derived` | Expression over input metrics | Month-over-month growth, YoY change |
-| `cumulative` | Running total over time window | Last 7 days sales, MTD registrations |
-| `conversion` | User funnel conversion | Visit → order conversion rate |
+| 类型 | 用途 | 示例 |
+|------|------|------|
+| `ratio` | 分子 ÷ 分母 | 转化率 = 下单数 / 访问数 |
+| `derived` | 基于已有指标的表达式 | 环比增长、同比变化 |
+| `cumulative` | 按时间窗口累计 | 近 7 天销售额、月累计注册 |
+| `conversion` | 用户漏斗转化 | 访问→下单转化率 |
 
 ### 6.4 Manifest (`src/store/manifest.py`)
 
 ```python
 SemanticManifest(semantic_manifest.json)
   .list_metrics()                    # → [{name, description}, ...]
-  .get_metric(name)                  # → full metric definition
+  .get_metric(name)                  # → 完整指标定义
   .list_dimensions_for_metric(name)  # → [{name, type, description}, ...]
   .search(keywords)                  # → [{type, name, description}, ...]
-  .get_semantic_table_names()        # → set of table names (for conflict detection)
+  .get_semantic_table_names()        # → 表名集合（用于冲突检测）
 ```
 
 ---
 
-## 7. Connection Management
+## 7. 连接管理
 
-### 7.1 Connection Pool (`src/core/connection.py`)
+### 7.1 连接池 (`src/core/connection.py`)
 
 ```python
 ConnectionPool
-  ├─ aiomysql.Pool (lazy init, asyncio.Lock guarded)
+  ├─ aiomysql.Pool（懒初始化，asyncio.Lock 保护）
   ├─ execute(sql, database, max_rows, timeout) → ([{col: val}, ...], [col_names])
-  ├─ Per-user pools via PoolManager (non-127.0.0.1 IP)
+  ├─ 通过 PoolManager 按用户创建独立连接池（非 127.0.0.1 IP）
   └─ close() → pool.close() + wait_closed()
 ```
 
-### 7.2 Pool Types
+### 7.2 连接池类型
 
-| Pool | User | Min/Max | Purpose |
-|------|------|---------|---------|
-| Admin pool | `admin` | 0/10 | Semantic file storage, workspace management, health checks |
-| Per-user pools | `<authenticated_user>` | 0/10 | SQL query execution with proper Doris authorization |
+| 池 | 用户 | 最小/最大 | 用途 |
+|----|------|-----------|------|
+| Admin 池 | `admin` | 0/10 | 语义文件存储、工作区管理、健康检查 |
+| 每用户池 | `<认证用户>` | 0/10 | 以用户身份执行 SQL 查询 |
 
 ---
 
 ## 8. Web UI
 
-### 8.1 Routes
+### 8.1 路由表
 
-| Route | Method | Auth | Purpose |
-|-------|--------|------|---------|
-| `/mcp/web/login` | GET | None | Login form |
-| `/mcp/web/login` | POST | None | Process login, set session cookie |
-| `/mcp/web/logout` | GET | Session | Clear session |
-| `/mcp/web` | GET | Session | Redirect to models page |
-| `/mcp/web/models` | GET | Session | Active/staging file list + workspace status |
-| `/mcp/web/{filename}` | GET | Session | Edit YAML file |
-| `/mcp/web/new` | GET | Admin | New file form |
-| `/mcp/web/create` | POST | Admin | Create new file |
-| `/mcp/web/{filename}/save` | POST | Admin | Save edited file |
-| `/mcp/web/{filename}/delete` | GET | Admin | Mark file for deletion |
-| `/mcp/web/upload` | POST | Admin | Upload YAML files (multipart) |
+| 路由 | 方法 | 认证 | 用途 |
+|------|------|------|------|
+| `/mcp/web/login` | GET | 无 | 登录表单 |
+| `/mcp/web/login` | POST | 无 | 处理登录，设置会话 Cookie |
+| `/mcp/web/logout` | GET | Session | 清除会话 |
+| `/mcp/web` | GET | Session | 跳转到模型管理页 |
+| `/mcp/web/models` | GET | Session | 已生效/待提交文件列表 + 工作区状态 |
+| `/mcp/web/{filename}` | GET | Session | 编辑 YAML 文件 |
+| `/mcp/web/new` | GET | Admin | 新建文件表单 |
+| `/mcp/web/create` | POST | Admin | 创建新文件 |
+| `/mcp/web/{filename}/save` | POST | Admin | 保存编辑的文件 |
+| `/mcp/web/{filename}/delete` | GET | Admin | 标记文件为待删除 |
+| `/mcp/web/upload` | POST | Admin | 上传 YAML 文件（multipart） |
 
-### 8.2 REST API
+### 8.2 REST API 路由表
 
-| Route | Method | Auth | Purpose |
-|-------|--------|------|---------|
-| `/mcp/web/semantic/push` | POST | Admin (Bearer) | CLI: upload YAML (multipart) |
-| `/mcp/web/semantic/pull` | GET | Bearer | CLI: download active YAML as `.tar.gz` |
-| `/mcp/web/semantic/reload` | POST | Admin | HTTP: trigger workspace reload |
-| `/mcp/web/semantic/files` | GET | Bearer | List active files |
-| `/mcp/web/semantic/files/{filename}` | GET | Bearer | Get file content |
-| `/mcp/web/semantic/files` | POST | Admin | Save file to staging |
-| `/mcp/web/semantic/files/{filename}` | DELETE | Admin | Delete file from staging |
-| `/mcp/web/staging/validate` | POST | Admin | Validate staging changes |
-| `/mcp/web/staging/commit` | POST | Admin | Commit staging → active |
-| `/mcp/web/staging/discard` | POST | Admin | Discard staging changes |
-| `/mcp/web/workspace/create` | POST | Admin | Create new workspace |
-| `/mcp/web/workspace/delete` | POST | Admin | Delete workspace (drops tables) |
+| 路由 | 方法 | 认证 | 用途 |
+|------|------|------|------|
+| `/mcp/web/semantic/push` | POST | Admin (Bearer) | CLI：上传 YAML（multipart） |
+| `/mcp/web/semantic/pull` | GET | Bearer | CLI：下载已生效 YAML（.tar.gz） |
+| `/mcp/web/semantic/reload` | POST | Admin | HTTP：触发工作区重载 |
+| `/mcp/web/semantic/files` | GET | Bearer | 列出已生效文件 |
+| `/mcp/web/semantic/files/{filename}` | GET | Bearer | 获取文件内容 |
+| `/mcp/web/semantic/files` | POST | Admin | 保存文件到 staging |
+| `/mcp/web/semantic/files/{filename}` | DELETE | Admin | 从 staging 删除文件 |
+| `/mcp/web/staging/validate` | POST | Admin | 验证待提交变更 |
+| `/mcp/web/staging/commit` | POST | Admin | 提交到已生效 |
+| `/mcp/web/staging/discard` | POST | Admin | 丢弃待提交变更 |
+| `/mcp/web/workspace/create` | POST | Admin | 创建工作区 |
+| `/mcp/web/workspace/delete` | POST | Admin | 删除工作区（DROP 存储表） |
 
 ---
 
-## 9. CLI Client (`mcp-client/`)
+## 9. CLI 客户端 (`mcp-client/`)
 
-A standalone command-line client shipped as a separate tarball. Configuration via environment variables or `doris-mcp-client.toml`:
+独立的命令行客户端，作为单独 tar.gz 包分发。通过环境变量或 `doris-mcp-client.toml` 配置连接：
 
 ```bash
 export DORIS_MCP_SERVER=http://<host>:<port>
 export DORIS_MCP_TOKEN=admin:admin
 ```
 
-**MCP Tool calls:**
+**MCP Tool 调用：**
 ```bash
 doris-mcp-client tool list
 doris-mcp-client tool call list_metrics --json '{"workspace":"example"}'
 doris-mcp-client tool call query_metric --json '{"metrics":["total_amount"],"group_by":["channel"]}'
 ```
 
-**Semantic management:**
+**语义模型管理：**
 ```bash
 doris-mcp-client semantic push ./models -w example
 doris-mcp-client semantic pull -o ./backup -w example
@@ -463,147 +463,146 @@ doris-mcp-client semantic status
 
 ---
 
-## 10. Example Workspace
+## 10. 示例工作区
 
-On first boot (if `seed_example=true`), the system auto-creates:
+首次启动时（若 `seed_example=true`），系统自动创建：
 
-| Table | Rows | Description |
-|-------|------|-------------|
-| `dw.orders` | 12 | Orders with order_id, user_id, product_id, amount, channel, status, order_date |
-| `dw.users` | 5 | Users with user_id, name, city, level, register_date |
-| `dw.products` | 5 | Products with product_id, name, category, brand, price |
-| `dw.dim_date` | 365 | Date dimension for time spine alignment |
+| 表 | 行数 | 说明 |
+|----|------|------|
+| `dw.orders` | 12 | 订单表，含 order_id/user_id/product_id/amount/channel/status/order_date |
+| `dw.users` | 5 | 用户表，含 user_id/name/city/level/register_date |
+| `dw.products` | 5 | 商品表，含 product_id/name/category/brand/price |
+| `dw.dim_date` | 365 | 日期维度表，用于时间轴对齐 |
 
-**5 example metrics:** `total_amount`, `order_count`, `avg_amount`, `unique_users` (from orders), `user_count` (from users)
-
----
-
-## 11. Key Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| `stateless_http=True` | No MCP session tracking. Required for clients (VeloDB proxy, Claude Desktop) that don't maintain session state across requests. |
-| Doris-backed stores | YAML stored in Doris tables (`system_mcp`), not filesystem. Enables multi-server deployment with shared state, no file sync needed. |
-| Two-tier staging (active + staging) | Prevents broken models from reaching production. Validate-before-commit gate with comprehensive checks. |
-| Compile-only `_DorisSqlClientStub` | MetricFlow needs `SqlClient` for dialect rendering; actual execution via `aiomysql` pool with user credentials. |
-| Per-user connection pools | Each authenticated user gets their own aiomysql pool with their credentials. Preserves Doris-native authorization. |
-| Embedded HTML templates | Web UI is self-contained (no external CDN), works behind proxy/VPN. Single-file deployment. |
-| Python 3.10 standalone build | Self-contained distribution via `python-build-standalone`. No system Python needed at runtime. |
-| Audit logging with timed rotation | Every tool call logged with client_id, params, duration, success/failure. Rotated at midnight, 30-day retention. |
+**5 个示例指标：** `total_amount`（订单总额）、`order_count`（订单数）、`avg_amount`（客单价）、`unique_users`（独立用户）、`user_count`（用户数）
 
 ---
 
-## 12. Build & Distribution
+## 11. 关键设计决策
 
-### 12.1 Build (`build.sh`)
+| 决策 | 原因 |
+|------|------|
+| `stateless_http=True` | 不维护 MCP 会话状态。兼容不保持 session 的客户端（VeloDB 代理、Claude Desktop）。 |
+| Doris 存储 YAML | 模型文件存在 Doris 表中而非文件系统。支持多服务器共享状态部署，无需文件同步。 |
+| 两级存储（active + staging） | 防止错误模型影响线上。强制「先验证再提交」的卡控机制。 |
+| 仅编译模式的 `_DorisSqlClientStub` | MetricFlow 需要 SqlClient 做方言渲染，实际查询通过 aiomysql 池以用户身份执行。 |
+| 每用户连接池 | 每个认证用户获得独立 aiomysql 池，保留 Doris 原生用户级别授权。 |
+| 内嵌 HTML 模板 | Web UI 无外部 CDN 依赖，单文件部署，支持代理/VPN 访问。 |
+| Python 3.10 standalone 构建 | 通过 `python-build-standalone` 自包含分发。运行时不需要系统 Python。 |
+| 审计日志（定时轮转） | 每次 Tool 调用记录 client_id、参数、耗时、成功/失败。按天轮转，保留 30 天。 |
+
+---
+
+## 12. 构建与分发
+
+### 12.1 构建命令 (`build.sh`)
 
 ```bash
 ./build.sh linux-x64       # Linux x86_64
 ./build.sh linux-arm64     # Linux ARM64
 ./build.sh macos-x64       # macOS Intel
 ./build.sh macos-arm64     # macOS Apple Silicon
-./build.sh                 # Auto-detect platform
-./build.sh clean           # Remove python/, dist/, build artifacts
+./build.sh                 # 自动检测当前平台
+./build.sh clean           # 清理 python/、dist/、构建产物
 ```
 
-Downloads Python 3.10 standalone from `astral-sh/python-build-standalone`, installs dependencies from `requirements.txt`, produces two self-contained tarballs in `dist/`:
+从 `astral-sh/python-build-standalone` 下载 Python 3.10 独立发行版，根据 `requirements.txt` 安装依赖，生成两个自包含 tar.gz 包到 `dist/`：
 
 ```
 dist/
-├── doris-mcp-server-0.3.0-{platform}.tar.gz    ← python/ + src/ + config
+├── doris-mcp-server-0.3.0-{platform}.tar.gz    ← python/ + src/ + 配置
 └── doris-mcp-client-0.3.0-{platform}.tar.gz    ← python/ + mcp-client/
 ```
 
-### 12.2 Deployment
+### 12.2 部署
 
 ```bash
-# 1. Extract
+# 1. 解压
 tar xzf doris-mcp-server-0.3.0-linux-x64.tar.gz
 cd doris-mcp-server
 
-# 2. Configure (optional — defaults work for localhost:9030)
+# 2. 配置（可选，默认 localhost:9030 即可）
 vim mcp-server.toml
 
-# 3. Start
-./start-mcp-server.sh                     # foreground
-nohup ./start-mcp-server.sh > /tmp/doris-mcp.log 2>&1 &   # background
+# 3. 启动
+./start-mcp-server.sh                     # 前台
+nohup ./start-mcp-server.sh > /tmp/doris-mcp.log 2>&1 &   # 后台
 ```
 
-No network, no pip, no system Python required at runtime. Use `DORIS_MCP_PYTHON` env var to override the bundled Python:
+运行时无需网络、无需 pip、无需系统 Python。通过 `DORIS_MCP_PYTHON` 环境变量可覆盖自带 Python：
 
 ```bash
 DORIS_MCP_PYTHON=/usr/bin/python3.10 ./start-mcp-server.sh
 ```
 
-### 12.3 Verification
+### 12.3 验证
 
 ```bash
 # WebUI
 curl http://<IP>:3000/mcp/web
-# Login with admin:<empty_password>
 
-# MCP Agent
+# MCP Agent 接入
 claude mcp add --transport http doris http://<IP>:3000/mcp \
   --header "Authorization: Bearer admin:admin"
 ```
 
 ---
 
-## 13. Directory Structure
+## 13. 目录结构
 
 ```
 doris-mcp-server/
-├── build.sh                     # Build script (setup → pack)
-├── requirements.txt             # Python 3.10 dependencies
-├── mcp-server.toml              # Server configuration
-├── start-mcp-server.sh          # Server launcher
-├── mcp-client.sh                # Client launcher
-├── INSTALL.html                 # Installation guide
-├── doris-mcp-docs.html          # Full documentation (semantic models + user guide)
-├── DESIGN.md                    # This file
+├── build.sh                     # 构建脚本
+├── requirements.txt             # Python 3.10 依赖
+├── mcp-server.toml              # 服务配置
+├── start-mcp-server.sh          # 启动脚本
+├── mcp-client.sh                # 客户端启动脚本
+├── INSTALL.html                 # 安装指南
+├── doris-mcp-docs.html          # 完整文档（语义模型 + 用户指南）
+├── DESIGN.md                    # 本文档
 ├── src/
-│   ├── main.py                  # Entry point + FastMCP.run()
-│   ├── server.py                # Server factory, 10 tools, Web UI routes, REST API
-│   ├── auth/                    # Credential verifier, cache, token-based auth
-│   │   ├── credential_cache.py  # 10-min TTL in-memory cache
-│   │   ├── credential_verifier.py # Bearer token → Doris verification
-│   │   ├── guard.py             # Tool-level access gate
-│   │   ├── provider.py          # StaticTokenVerifier, JWTVerifier
-│   │   └── config.py            # Auth config parsing
+│   ├── main.py                  # 入口 + FastMCP.run()
+│   ├── server.py                # 服务工厂、10 个 Tool、Web UI 路由、REST API
+│   ├── auth/                    # 认证模块
+│   │   ├── credential_cache.py  # 10 分钟 TTL 内存缓存
+│   │   ├── credential_verifier.py # Bearer token → Doris 验证
+│   │   ├── guard.py             # Tool 级访问控制
+│   │   ├── provider.py          # StaticTokenVerifier、JWTVerifier
+│   │   └── config.py            # 认证配置解析
 │   ├── config/
-│   │   └── loader.py            # TOML/YAML config with ${VAR} interpolation
-│   ├── core/
-│   │   ├── connection.py        # aiomysql async connection pool
-│   │   ├── pool_manager.py      # Per-user pool factory
-│   │   ├── audit.py             # Timed rotating audit log
-│   │   ├── health.py            # Service health component tracking
-│   │   ├── response.py          # JSON success/error response helpers
-│   │   ├── sql_validator.py     # SQL read-only enforcement (sqlglot-based)
-│   │   ├── charset.py           # Charset middleware
-│   │   ├── request_logger.py    # Request logging middleware
-│   │   ├── pagination.py        # Cursor-based pagination
-│   │   ├── semantic_guard.py    # Semantic conflict detection
-│   │   └── sensitive_mask.py    # Sensitive data masking
-│   ├── store/
-│   │   ├── store.py             # DorisStore: active/staging tables per workspace
-│   │   ├── watcher.py           # MultiWorkspaceWatcher: poll, reload, validate, commit
-│   │   ├── compiler.py          # MetricFlowCompiler with _DorisSqlClientStub
-│   │   ├── manifest.py          # SemanticManifest: parse semantic_manifest.json
-│   │   ├── bootstrap.py         # MetricFlow build (dbt parse + manifest generation)
-│   │   ├── seed.py              # Example data seeding
-│   │   └── version.py           # Version tracking for each workspace
-│   ├── tools/
-│   │   ├── discovery.py         # list_databases, list_tables, describe_table
-│   │   ├── query.py             # execute_query (SQL execution)
-│   │   └── semantic.py          # list_metrics, list_dimensions_for_metric, query_metric
+│   │   └── loader.py            # TOML/YAML 配置 + ${VAR} 环境变量插值
+│   ├── core/                    # 核心模块
+│   │   ├── connection.py        # aiomysql 异步连接池
+│   │   ├── pool_manager.py      # 每用户连接池工厂
+│   │   ├── audit.py             # 定时轮转审计日志
+│   │   ├── health.py            # 服务健康状态追踪
+│   │   ├── response.py          # JSON 成功/错误响应
+│   │   ├── sql_validator.py     # SQL 只读校验（基于 sqlglot）
+│   │   ├── charset.py           # 字符集中间件
+│   │   ├── request_logger.py    # 请求日志中间件
+│   │   ├── pagination.py        # 游标分页
+│   │   ├── semantic_guard.py    # 语义冲突检测
+│   │   └── sensitive_mask.py    # 敏感数据脱敏
+│   ├── store/                   # 工作区存储模块
+│   │   ├── store.py             # DorisStore：每工作区 active/staging 表
+│   │   ├── watcher.py           # MultiWorkspaceWatcher：轮询、重载、验证、提交
+│   │   ├── compiler.py          # MetricFlowCompiler + _DorisSqlClientStub
+│   │   ├── manifest.py          # SemanticManifest：解析 semantic_manifest.json
+│   │   ├── bootstrap.py         # MetricFlow 构建（dbt 解析 + manifest 生成）
+│   │   ├── seed.py              # 示例数据播种
+│   │   └── version.py           # 工作区版本追踪
+│   ├── tools/                   # Tool 实现
+│   │   ├── discovery.py         # list_databases、list_tables、describe_table
+│   │   ├── query.py             # execute_query（SQL 执行）
+│   │   └── semantic.py          # list_metrics、list_dimensions_for_metric、query_metric
 │   ├── skills/
-│   │   └── doris-mcp-skill.md   # Query guide markdown (served by get_query_guide)
-│   └── metricflow/              # Vendored MetricFlow engine (compile-only)
-└── mcp-client/                  # CLI client (separate package)
+│   │   └── doris-mcp-skill.md   # 查询指引（get_query_guide 返回）
+│   └── metricflow/              # 内置 MetricFlow 引擎（仅编译模式）
+└── mcp-client/                  # CLI 客户端（独立包）
     └── client/
-        ├── cli.py               # CLI entry (cyclopts)
-        ├── config.py            # Env/file config loading
-        ├── http_client.py       # HTTP API client
-        ├── mcp_client.py        # MCP streamable-http transport
-        └── formatting.py        # Output formatting
+        ├── cli.py               # CLI 入口（cyclopts 框架）
+        ├── config.py            # 环境变量/文件配置
+        ├── http_client.py       # HTTP API 客户端
+        ├── mcp_client.py        # MCP streamable-http 传输层
+        └── formatting.py        # 输出格式化
 ```
