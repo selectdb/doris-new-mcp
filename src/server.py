@@ -47,8 +47,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
     # Seed example workspace on first boot (configurable)
     if cfg.mcp.seed_example:
-        from store.seed import seed_all, set_doris_port as seed_set_port
+        from store.seed import seed_all, set_doris_port as seed_set_port, set_doris_password as seed_set_password
         seed_set_port(cc.fe_mysql_port)
+        seed_set_password(cc.fe_password)
         _seeded = seed_all()
         if _seeded:
             logger.info("Example workspace seeded (data + models)")
@@ -57,14 +58,14 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
     # Multi-workspace watcher
     from store.watcher import MultiWorkspaceWatcher
-    from store.store import set_doris_port
+    from store.store import set_doris_port, set_doris_password
     set_doris_port(cc.fe_mysql_port)
+    set_doris_password(cc.fe_password)
     multi_watcher = MultiWorkspaceWatcher(
         config_dir=_Path(config_path),
         workspace_root=_ws_root,
         app_config=cfg,
     )
-    multi_watcher.start()
     logger.info(f"Multi-workspace watcher ready: {multi_watcher.workspace_names()}")
 
     # Setup logging: write to workspace/logs/server.log + stderr
@@ -108,7 +109,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     admin_pool = ConnectionPool(
         cc,
         user="admin",
-        password="",
+        password=cc.fe_password,
         min_size=0,
         max_size=10,
     )
@@ -435,6 +436,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         else:
             service_health.get("doris_connection").set_error(f"Connection failed: {db_error}")
 
+        # Ensure all known workspaces are loaded (on-demand)
+        for ws_name in multi_watcher.workspace_names():
+            multi_watcher.ensure_fresh(ws_name)
+
         # Per-workspace status
         ws_statuses: dict[str, dict] = {}
         for ws_name in multi_watcher.workspace_names():
@@ -493,9 +498,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        if not multi_watcher.get_manifest(workspace) or not multi_watcher.get_compiler(workspace):
+        ws = multi_watcher.ensure_fresh(workspace)
+        if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
-        result = await _list_metrics(multi_watcher.get_manifest(workspace), page_size, page_token or None)
+        result = await _list_metrics(ws.manifest, page_size, page_token or None)
         log_tool_call("list_metrics", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=True)
         return result
@@ -509,9 +515,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        if not multi_watcher.get_manifest(workspace) or not multi_watcher.get_compiler(workspace):
+        ws = multi_watcher.ensure_fresh(workspace)
+        if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
-        result = await _list_dims(multi_watcher.get_manifest(workspace), metric_name)
+        result = await _list_dims(ws.manifest, metric_name)
         log_tool_call("list_dimensions_for_metric", client_id=auth.client_id, params={"metric_name": metric_name},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=True)
         return result
@@ -535,18 +542,19 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        if not multi_watcher.get_manifest(workspace) or not multi_watcher.get_compiler(workspace):
+        ws = multi_watcher.ensure_fresh(workspace)
+        if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         if group_by:
-            group_by = multi_watcher.get_compiler(workspace).resolve_group_by(metrics, group_by)
+            group_by = ws.compiler.resolve_group_by(metrics, group_by)
         if order_by:
-            order_by = multi_watcher.get_compiler(workspace).resolve_group_by(metrics, order_by)
+            order_by = ws.compiler.resolve_group_by(metrics, order_by)
         if where:
-            where = multi_watcher.get_compiler(workspace).resolve_where(metrics, where)
+            where = ws.compiler.resolve_where(metrics, where)
 
         pool = await _get_per_user_pool(auth.pool)
 
-        result = await _query_metric(multi_watcher.get_compiler(workspace), pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
+        result = await _query_metric(ws.compiler, pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
         duration = (time.monotonic() - start) * 1000
         success = '"success": true' in result
         mf_cmd = f"mf query --metrics {','.join(metrics)}"
@@ -565,6 +573,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         auth = check_tool_access("reload_semantic_layer")
         if auth.denied:
             return auth.denied
+        ws = multi_watcher.ensure_fresh(workspace)
+        if not ws:
+            return error_response(ErrorCode.VALIDATION_ERROR, f"Workspace not found: {workspace}")
         status, msg = multi_watcher.force_reload(workspace)
         log_tool_call("reload_semantic_layer", client_id=auth.client_id,
                       success=(status == "accepted"), duration_ms=0, metricflow=True)
