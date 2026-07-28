@@ -27,6 +27,27 @@ from tools.query import execute_query as _execute_query
 logger = logging.getLogger("doris_new_mcp")
 
 
+def _try_grant_select_priv(host: str, port: int, admin_password: str) -> tuple[bool, str]:
+    """Grant SELECT_PRIV on *.* to all users (idempotent, one-time init).
+
+    Called once at startup under ``seed_example=true``.
+    Returns (True, "") on success, (False, error_message) on failure.
+    Does NOT raise — failures are always non-fatal.
+    """
+    import pymysql
+    try:
+        conn = pymysql.connect(
+            host=host, port=port,
+            user="admin", password=admin_password,
+            charset="utf8mb4", connect_timeout=5,
+        )
+        conn.cursor().execute("GRANT SELECT_PRIV ON *.* TO '%'")
+        conn.close()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
     """Create and configure the MCP server."""
     if config_dir is None:
@@ -52,6 +73,13 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         _seeded = seed_all()
         if _seeded:
             logger.info("Example workspace seeded (data + models)")
+
+        # One-time: grant read-only access to all users (idempotent, persisted in Doris)
+        ok, err = _try_grant_select_priv(cc.fe_host, cc.fe_mysql_port, cc.fe_password)
+        if ok:
+            logger.info("GRANT SELECT_PRIV ON *.* TO '%' — done")
+        else:
+            logger.debug("GRANT skipped (non-fatal): %s", err)
     else:
         logger.info("Example workspace seeding disabled (seed_example=false)")
 
