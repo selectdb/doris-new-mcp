@@ -213,8 +213,6 @@ class MultiWorkspaceWatcher:
 
         self._workspaces: dict[str, WorkspaceState] = {}
         self._router = MetricRouter()
-        self._stop_event = threading.Event()
-        self._discovery_thread: threading.Thread | None = None
 
         # P2-1: Track which workspaces have had staging validated since last change
         self._staging_validated: set[str] = set()
@@ -281,8 +279,8 @@ class MultiWorkspaceWatcher:
         self._workspaces[ws_name] = ws
 
         if first_load:
-            # Bootstrap immediately
-            self._reload_workspace(ws)
+            # Do NOT eager-load. The first ensure_fresh call will trigger reload.
+            ws.known_revision = ""
         else:
             # Set initial revision for polling
             try:
@@ -295,57 +293,67 @@ class MultiWorkspaceWatcher:
         return ws
 
     # ------------------------------------------------------------------
-    # Poll loop
+    # On-demand freshness (ensure_fresh)
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
-        self._stop_event.clear()
-        self._discovery_thread = threading.Thread(
-            target=self._poll_loop, daemon=True, name="ws-discovery"
-        )
-        self._discovery_thread.start()
-        service_health.get("config_watcher").set_healthy("Multi-workspace poll (60s)")
-        logger.info(f"Multi-workspace watcher started ({len(self._workspaces)} workspace(s))")
+    def ensure_fresh(self, workspace_name: str, ttl: float = 60.0) -> WorkspaceState | None:
+        """Ensure workspace manifest/compiler is fresh (on-demand lazy loading).
+        
+        If the workspace was loaded within the last ``ttl`` seconds, skip
+        the revision check entirely (cooldown).  Otherwise, query the store
+        for the current revision and reload only when it changed.
+        
+        Returns the WorkspaceState on success, or None if the workspace does
+        not exist.
+        """
+        ws = self._workspaces.get(workspace_name)
+        if ws is None:
+            ws = self._discover_workspace(workspace_name)
+        if ws is None:
+            return None
+        
+        # Another request is already reloading — return current state as-is.
+        if ws.parsing:
+            return ws
+        
+        current = ws.version_tracker.current
+        if current is not None and time.time() - current.loaded_epoch < ttl:
+            # Within cooldown — skip revision check.
+            return ws
+        
+        # Cooldown expired (or first load) — check revision.
+        try:
+            new_rev = ws.store.check_remote().revision
+        except Exception:
+            logger.warning(f"[{workspace_name}] Doris unreachable during freshness check")
+            if ws.manifest is not None:
+                return ws  # serve stale data
+            return None   # no data at all
+        
+        if current is not None and new_rev == ws.known_revision:
+            # Revision unchanged — just bump the epoch.
+            ws.version_tracker.touch_epoch()
+            return ws
+        
+        # Revision changed or first load — reload.
+        self._reload_workspace(ws)
+        return ws
 
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._discovery_thread:
-            self._discovery_thread.join(timeout=5)
-        self._discovery_thread = None
-
-    def _poll_loop(self) -> None:
-        _POLL_INTERVAL = 60
-        while not self._stop_event.is_set():
-            try:
-                # 1. Check existing workspaces for version changes
-                for ws_name, ws in list(self._workspaces.items()):
-                    if ws.parsing:
-                        continue
-                    try:
-                        new_ver = ws.store.check_remote().revision
-                        if new_ver and new_ver != ws.known_revision:
-                            logger.info(
-                                f"[{ws_name}] Version change: {ws.known_revision[:8] if ws.known_revision else '?'} → {new_ver[:8]}"
-                            )
-                            self._reload_workspace_async(ws)
-                    except Exception:
-                        logger.exception(f"[{ws_name}] Poll check failed")
-
-                # 2. Discover new / remove stale workspace tables
-                current = set(DorisStore.discover_workspaces())
-                known = set(self._workspaces.keys())
-                for new_ws in current - known:
-                    logger.info(f"New workspace discovered: {new_ws}")
-                    self._init_workspace(new_ws)
-                for stale in known - current:
-                    logger.info(f"Workspace removed (tables dropped): {stale}")
-                    self._workspaces.pop(stale, None)
-                    DorisStore._table_cache.pop(stale, None)  # clear cache so re-creation works
-                    self._router.rebuild(self._workspaces)
-
-            except Exception:
-                logger.exception("Poll loop error")
-            self._stop_event.wait(_POLL_INTERVAL)
+    def _discover_workspace(self, name: str) -> WorkspaceState | None:
+        """Try to discover and initialise a workspace on demand.
+        
+        Called by ensure_fresh when the workspace is not in memory.
+        Returns a WorkspaceState if tables exist in Doris, else None.
+        """
+        try:
+            existing = DorisStore.discover_workspaces()
+        except Exception:
+            logger.warning(f"Workspace discovery failed (Doris unreachable)")
+            return None
+        if name not in existing:
+            return None
+        logger.info(f"Workspace '{name}' discovered on demand")
+        return self._init_workspace(name, first_load=False)
 
     # ------------------------------------------------------------------
     # Reload
@@ -404,8 +412,10 @@ class MultiWorkspaceWatcher:
             duration = (time.monotonic() - t0) * 1000
 
             # Update version tracker
+            now_epoch = time.time()
             version = SemanticLayerVersion(
-                loaded_at=SemanticLayerVersion.now_iso(),
+                loaded_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_epoch)),
+                loaded_epoch=now_epoch,
                 revision=ws.known_revision,
                 source_type=ws.store.store_type,
                 source_uri=ws.store.source_uri,
