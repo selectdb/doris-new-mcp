@@ -19,6 +19,9 @@ class SemanticLayerVersion:
     loaded_at: str
     """ISO8601 timestamp of when this version was loaded — the sole external identifier."""
 
+    loaded_epoch: float
+    """Epoch seconds of when this version was loaded — for cooldown comparison."""
+
     revision: str
     """Store-returned opaque revision (for equality comparison)."""
 
@@ -58,12 +61,24 @@ class VersionTracker:
         with self._lock:
             self._version = version
 
+    def touch_epoch(self) -> None:
+        """Bump loaded_epoch to now without changing the version identity.
+
+        Used when a freshness check finds revision unchanged — records
+        that we verified the version is still current, resetting the
+        cooldown timer without a full reload.
+        """
+        with self._lock:
+            if self._version:
+                self._version.loaded_epoch = time.time()
+
     def mark_failure(self) -> None:
         """Mark the last reload as failed (keeps existing version otherwise)."""
         with self._lock:
             if self._version:
                 self._version = SemanticLayerVersion(
                     loaded_at=self._version.loaded_at,
+                    loaded_epoch=self._version.loaded_epoch,
                     revision=self._version.revision,
                     source_type=self._version.source_type,
                     source_uri=self._version.source_uri,
