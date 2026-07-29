@@ -446,10 +446,15 @@ class TestEnsureFreshGracefulDegradation(unittest.TestCase):
         self.watcher._router = MagicMock()
         self.watcher._staging_validated = set()
 
-    # ── Test 9: Doris unreachable, manifest exists → use old version ──
+    # ── Test 9: Doris unreachable, manifest exists → still refuse ──
 
-    def test_doris_unreachable_with_manifest_returns_old(self):
-        """When store.check_remote() throws but manifest exists, return current ws."""
+    def test_doris_unreachable_with_manifest_returns_none(self):
+        """check_remote() failing means the manifest's age is unknown.
+
+        Serving it anyway would hand back metric definitions that may be
+        outdated, with nothing to tell the caller apart from a correct
+        answer, so ensure_fresh refuses even when a manifest is loaded.
+        """
         from store.version import SemanticLayerVersion
 
         old_version = SemanticLayerVersion(
@@ -473,8 +478,10 @@ class TestEnsureFreshGracefulDegradation(unittest.TestCase):
 
         result = self.watcher.ensure_fresh("test")
 
-        self.assertIsNotNone(result, "Should return cached ws when Doris down")
-        self.assertIsNotNone(result.manifest)
+        self.assertIsNone(
+            result,
+            "Should refuse rather than serve a manifest of unknown freshness",
+        )
 
     # ── Test 10: Doris unreachable, no manifest → return None ──
 
