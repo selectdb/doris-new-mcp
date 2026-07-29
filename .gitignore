@@ -12,3 +12,7 @@ dist/
 python/
 logs/
 *.tar.gz
+
+# Local MCP client config — carries a Bearer credential and a cluster URL.
+.mcp.json
+.vscode/
