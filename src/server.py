@@ -7,9 +7,23 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolAnnotations
+
+if TYPE_CHECKING:
+    # Annotation-only. These are imported lazily inside the handlers at
+    # runtime; `from __future__ import annotations` keeps the signatures
+    # from evaluating them, so this block exists purely for type checkers.
+    from starlette.requests import Request
+    from starlette.responses import (
+        JSONResponse,
+        Response,
+        Response as _StarletteResponse,
+    )
+
+    from store.store import DorisStore
 
 from auth import check_tool_access, init_guard
 from config.loader import AppConfig
@@ -192,11 +206,22 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         from store.store import DorisStore as _DS
         return _DS(workspace=workspace)
 
+    from starlette.datastructures import UploadFile as _UploadFile
+
+    def _form_str(form, key: str, default: str = "") -> str:
+        """Read a form field as text.
+
+        ``form.get()`` yields ``UploadFile | str | None`` — a client may post
+        a file part where a text field is expected. Treat any non-text value
+        as absent rather than letting an UploadFile flow into string code.
+        """
+        value = form.get(key)
+        return value if isinstance(value, str) else default
+
     # ── Auth infrastructure ──
 
     import re as _re
     import secrets as _secrets
-    import time as _time_module
     _VALID_WORKSPACE_NAME = _re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*$')
     _webui_sessions: dict[str, dict] = {}
     _SESSION_TTL = 24 * 3600  # 24 hours
@@ -226,18 +251,21 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
             on_auth_error=lambda: _credential_cache.clear(username, password),
         )
 
-    async def _pool_or_error(tool_name: str) -> tuple[ConnectionPool | None, str | None]:
-        """Resolve the per-user pool, converting failures into a tool error.
+    async def _acquire_pool(tool_name: str) -> ConnectionPool | str:
+        """Resolve the per-user pool, or return an error response to send back.
 
         Tool handlers must never let a connection failure escape — an
         uncaught exception tears down the MCP transport instead of
         returning a result the caller can act on.
+
+        Returns the pool on success, or the JSON error string on failure.
+        Callers narrow with ``isinstance(pool, str)``.
         """
         try:
-            return await _get_per_user_pool(), None
+            return await _get_per_user_pool()
         except Exception as e:
             logger.warning("%s: cannot acquire Doris connection: %s", tool_name, e)
-            return None, error_response(
+            return error_response(
                 ErrorCode.CONNECTION_ERROR,
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
@@ -389,9 +417,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool, err = await _pool_or_error("list_databases")
-        if err:
-            return err
+        pool = await _acquire_pool("list_databases")
+        if isinstance(pool, str):
+            return pool
         result = await _list_databases(pool, page_size, page_token or None, cc.db_whitelist or None)
         log_tool_call("list_databases", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -411,9 +439,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         start = time.monotonic()
         if cc.db_whitelist and database not in cc.db_whitelist:
             return error_response(ErrorCode.PERMISSION_DENIED, f"Database '{database}' not in whitelist")
-        pool, err = await _pool_or_error("list_tables")
-        if err:
-            return err
+        pool = await _acquire_pool("list_tables")
+        if isinstance(pool, str):
+            return pool
         result = await _list_tables(pool, database, like or None, page_size, page_token or None)
         log_tool_call("list_tables", client_id=auth.client_id, params={"database": database},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -428,9 +456,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool, err = await _pool_or_error("describe_table")
-        if err:
-            return err
+        pool = await _acquire_pool("describe_table")
+        if isinstance(pool, str):
+            return pool
         result = await _describe_table(pool, database, table, detail_level)
         log_tool_call("describe_table", client_id=auth.client_id, params={"database": database, "table": table},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -446,9 +474,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
 
-        pool, err = await _pool_or_error("execute_query")
-        if err:
-            return err
+        pool = await _acquire_pool("execute_query")
+        if isinstance(pool, str):
+            return pool
 
         start = time.monotonic()
         result = await _execute_query(pool, sql, database or None, max_rows or None)
@@ -475,12 +503,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         # Verify Doris DB connectivity (use per-user pool with request credentials)
         db_ok = False
         db_error = ""
-        health_pool, health_err = await _pool_or_error("check_service_health")
-        if health_err:
-            db_error = "credentials rejected by Doris"
+        health_pool = await _acquire_pool("check_service_health")
         try:
-            if health_pool is None:
-                raise RuntimeError(db_error)
+            if isinstance(health_pool, str):
+                raise RuntimeError("credentials rejected by Doris")
             await health_pool.execute("SELECT 1")
             db_ok = True
         except Exception as e:
@@ -608,9 +634,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if where:
             where = ws.compiler.resolve_where(metrics, where)
 
-        pool, err = await _pool_or_error("query_metric")
-        if err:
-            return err
+        pool = await _acquire_pool("query_metric")
+        if isinstance(pool, str):
+            return pool
 
         result = await _query_metric(ws.compiler, pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
         duration = (time.monotonic() - start) * 1000
@@ -641,7 +667,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
 
     @mcp.custom_route("/mcp/web/semantic/reload", methods=["POST"])
-    async def api_reload_semantic_layer(request: Request) -> JSONResponse:
+    async def api_reload_semantic_layer(request: Request) -> Response:
         """HTTP endpoint for CI/CD and schedulers. Admin only."""
         client_id, err = await _check_admin_access(request)
         if err:
@@ -661,7 +687,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
 
     @mcp.custom_route("/mcp/web/workspace/create", methods=["POST"])
-    async def api_workspace_create(request: Request) -> JSONResponse:
+    async def api_workspace_create(request: Request) -> Response:
         """Create a new workspace by creating storage tables."""
         client_id, err = await _check_admin_access(request)
         if err:
@@ -681,7 +707,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return _JSONResponse({"success": True, "data": {"workspace": name, "message": f"Workspace '{name}' created."}})
 
     @mcp.custom_route("/mcp/web/workspace/delete", methods=["POST"])
-    async def api_workspace_delete(request: Request) -> JSONResponse:
+    async def api_workspace_delete(request: Request) -> Response:
         """Delete a workspace by dropping its storage tables."""
         client_id, err = await _check_admin_access(request)
         if err:
@@ -710,7 +736,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
 
     @mcp.custom_route("/mcp/web/semantic/push", methods=["POST"])
-    async def api_semantic_push(request: Request) -> JSONResponse:
+    async def api_semantic_push(request: Request) -> Response:
         """CLI push: upload YAML files directly to staging_store for a workspace."""
         import yaml as _yaml
         client_id, err = await _check_admin_access(request)
@@ -725,12 +751,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                 status_code=400,
             )
         
-        ws = form.get("workspace", "example")
+        ws = _form_str(form, "workspace", "example")
         st = _get_store(ws)
 
         files_staged = 0
         for _, upload in form.multi_items():
-            if not hasattr(upload, 'filename') or not upload.filename:
+            if not isinstance(upload, _UploadFile) or not upload.filename:
                 continue
             filename = upload.filename
             if ".." in filename or "/" in filename or "\\" in filename:
@@ -769,7 +795,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         )
 
     @mcp.custom_route("/mcp/web/semantic/push/{request_id}", methods=["GET"])
-    async def api_semantic_push_result(request: Request) -> JSONResponse:
+    async def api_semantic_push_result(request: Request) -> Response:
         return _JSONResponse({"success": True, "data": {"message": "Push go to staging. Use validate + commit."}})
 
     @mcp.custom_route("/mcp/web/semantic/pull", methods=["GET"])
@@ -853,8 +879,8 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         from starlette.responses import HTMLResponse as _HTML, RedirectResponse as _R
         try:
             form = await request.form()
-            user = (form.get("user", "") or "").strip()
-            password = (form.get("password", "") or "")
+            user = _form_str(form, "user").strip()
+            password = _form_str(form, "password")
         except Exception:
             return _HTML(_render_login("Invalid form submission."), status_code=400)
 
@@ -1216,7 +1242,7 @@ function wsAction(url,label) {
         ws = _get_workspace_from_request(request)
         try:
             form = await request.form()
-            content = form.get("content", "")
+            content = _form_str(form, "content")
             _get_store(ws).staging_upsert(filename, content)
             return _Redirect(f"/mcp/web/models?workspace={ws}", status_code=303)
         except Exception as e:
@@ -1234,8 +1260,8 @@ function wsAction(url,label) {
         ws = _get_workspace_from_request(request)
         try:
             form = await request.form()
-            filename = (form.get("filename", "") or "").strip()
-            content = form.get("content", "")
+            filename = _form_str(form, "filename").strip()
+            content = _form_str(form, "content")
             if not filename:
                 body = '<div class="flash flash-err">Filename is required</div>'
                 html = _render_page(body, client_id, True, ws)
@@ -1267,7 +1293,7 @@ function wsAction(url,label) {
         uploaded = 0
         skipped = 0
         for _, upload in form.multi_items():
-            if not hasattr(upload, 'filename') or not upload.filename:
+            if not isinstance(upload, _UploadFile) or not upload.filename:
                 continue
             filename = upload.filename
             if ".." in filename or "/" in filename or "\\" in filename:
@@ -1294,7 +1320,7 @@ function wsAction(url,label) {
     # -- Staging API (validate / commit / discard) --
 
     @mcp.custom_route("/mcp/web/staging/list", methods=["GET"])
-    async def api_staging_list(request: Request) -> JSONResponse:
+    async def api_staging_list(request: Request) -> Response:
         client_id, _, err = await _check_semantic_access(request)
         if err:
             return err
@@ -1303,7 +1329,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": files})
 
     @mcp.custom_route("/mcp/web/staging/validate", methods=["POST"])
-    async def api_staging_validate(request: Request) -> JSONResponse:
+    async def api_staging_validate(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1318,7 +1344,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": {"valid": valid, "message": msg, "details": details}})
 
     @mcp.custom_route("/mcp/web/staging/commit", methods=["POST"])
-    async def api_staging_commit(request: Request) -> JSONResponse:
+    async def api_staging_commit(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1333,7 +1359,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": ok, "data": {"message": msg}})
 
     @mcp.custom_route("/mcp/web/staging/discard", methods=["POST"])
-    async def api_staging_discard(request: Request) -> JSONResponse:
+    async def api_staging_discard(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1351,7 +1377,7 @@ function wsAction(url,label) {
     # ---- Semantic Management API (for CLI, MUST be before {filename:path}) ----
 
     @mcp.custom_route("/mcp/web/semantic/files", methods=["GET"])
-    async def api_semantic_list_files(request: Request) -> JSONResponse:
+    async def api_semantic_list_files(request: Request) -> Response:
         client_id, _, err = await _check_semantic_access(request)
         if err:
             return err
@@ -1360,7 +1386,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": files})
 
     @mcp.custom_route("/mcp/web/semantic/files/{filename:path}", methods=["GET"])
-    async def api_semantic_get_file(request: Request) -> JSONResponse:
+    async def api_semantic_get_file(request: Request) -> Response:
         client_id, _, err = await _check_semantic_access(request)
         if err:
             return err
@@ -1375,7 +1401,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": data})
 
     @mcp.custom_route("/mcp/web/semantic/files", methods=["POST"])
-    async def api_semantic_save_file(request: Request) -> JSONResponse:
+    async def api_semantic_save_file(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1402,7 +1428,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": {"filename": filename, "staged": True}})
 
     @mcp.custom_route("/mcp/web/semantic/files/{filename:path}", methods=["DELETE"])
-    async def api_semantic_delete_file(request: Request) -> JSONResponse:
+    async def api_semantic_delete_file(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
