@@ -525,7 +525,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
         # Ensure all known workspaces are loaded (on-demand)
         for ws_name in multi_watcher.workspace_names():
-            multi_watcher.ensure_fresh(ws_name)
+            await asyncio.to_thread(multi_watcher.ensure_fresh, ws_name)
 
         # Per-workspace status
         ws_statuses: dict[str, dict] = {}
@@ -585,7 +585,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        ws = multi_watcher.ensure_fresh(workspace)
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
         if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         result = await _list_metrics(ws.manifest, page_size, page_token or None)
@@ -602,7 +602,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        ws = multi_watcher.ensure_fresh(workspace)
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
         if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         result = await _list_dims(ws.manifest, metric_name)
@@ -629,7 +629,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        ws = multi_watcher.ensure_fresh(workspace)
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
         if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         if group_by:
@@ -658,16 +658,18 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def reload_semantic_layer(workspace: str) -> str:
-        """Trigger async metric layer reload for a workspace. Returns immediately. Check result via check_service_health. workspace is required."""
+        """Reloads the metric layer for a workspace and waits for the result. workspace is required."""
         auth = check_tool_access("reload_semantic_layer")
         if auth.denied:
             return auth.denied
-        ws = multi_watcher.ensure_fresh(workspace)
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
         if not ws:
             return error_response(ErrorCode.VALIDATION_ERROR, f"Workspace not found: {workspace}")
-        status, msg = multi_watcher.force_reload(workspace)
+        status, msg = await asyncio.to_thread(multi_watcher.force_reload, workspace)
         log_tool_call("reload_semantic_layer", client_id=auth.client_id,
-                      success=(status == "accepted"), duration_ms=0, metricflow=True)
+                      success=(status == "done"), duration_ms=0, metricflow=True)
+        if status == "failed":
+            return error_response(ErrorCode.INTERNAL_ERROR, msg)
         return success_response({"status": status, "message": msg})
 
 
@@ -684,10 +686,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         ws = body.get("workspace", "example")
         if not multi_watcher.has_workspace(ws):
             return _JSONResponse({"success": False, "error": {"code": "VALIDATION_ERROR", "message": f"Workspace not found: {ws}"}}, status_code=400)
-        status, msg = multi_watcher.force_reload(ws)
+        status, msg = await asyncio.to_thread(multi_watcher.force_reload, ws)
         log_tool_call("reload_semantic_layer", client_id=client_id,
-                      success=(status == "accepted"), duration_ms=0, metricflow=True)
-        if status == "rejected":
+                      success=(status == "done"), duration_ms=0, metricflow=True)
+        if status in ("rejected", "failed"):
             return _JSONResponse({"success": False, "error": {"code": "RELOAD_FAILED", "message": msg}}, status_code=500)
         return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
 
