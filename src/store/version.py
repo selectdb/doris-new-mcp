@@ -87,16 +87,6 @@ class VersionTracker:
                     last_reload_success=False,
                 )
 
-    def touch_epoch(self) -> None:
-        """Bump loaded_epoch to now without replacing the version identity.
-
-        Used when check_remote shows no revision change — resets the
-        cooldown clock without a full reload.
-        """
-        with self._lock:
-            if self._version:
-                self._version.loaded_epoch = time.time()
-
     def to_external_dict(self) -> dict:
         """Return the version info for health/tool responses. Only loaded_at."""
         with self._lock:
