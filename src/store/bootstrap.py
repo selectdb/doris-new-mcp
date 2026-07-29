@@ -330,12 +330,12 @@ def pre_validate_physical(
         models_dir: Directory containing YAML model files
         db_host: Doris host (defaults to store's _DORIS_HOST)
         db_port: Doris port (defaults to store's _DORIS_PORT)
-        db_user: Doris user (defaults to store's _DORIS_USER)
-        db_password: Doris password (defaults to store's _DORIS_PASSWORD)
+        db_user: Doris user (overrides request credentials)
+        db_password: Doris password (overrides request credentials)
 
     Returns:
         (success, error_message)
-    """  
+    """
     import pymysql as _pymysql
     import yaml
     import re as _re
@@ -343,12 +343,18 @@ def pre_validate_physical(
     if not models_dir.exists():
         return False, f"Models directory not found: {models_dir}"
 
-    # P2-4: Resolve connection config from parameters or fall back to store defaults
-    from store.store import _DORIS_HOST, _DORIS_PORT, _DORIS_USER, _DORIS_PASSWORD
+    # P2-4: Resolve connection config — prefer explicit params, then request
+    # contextvar credentials (set by server.py before all store operations).
+    from store.store import _DORIS_HOST, _DORIS_PORT, _request_creds
     host = db_host or _DORIS_HOST
     port = db_port or _DORIS_PORT
-    user = db_user or _DORIS_USER
-    password = db_password if db_password is not None else _DORIS_PASSWORD
+    if db_user and db_password is not None:
+        user, password = db_user, db_password
+    else:
+        creds = _request_creds.get()
+        if creds is None:
+            return False, "No Doris credentials available — request must carry a valid Bearer token"
+        user, password = creds
 
     # P1-3: Detect expressions that are NOT simple column names
     # Simple column name: starts with letter, contains only [a-zA-Z0-9_], no spaces/parens/commas

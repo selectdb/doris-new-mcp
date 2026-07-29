@@ -21,6 +21,7 @@ staging_store_{workspace}
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -51,9 +52,22 @@ class StoreState:
 
 _DORIS_HOST = "127.0.0.1"
 _DORIS_PORT = 9030
-_DORIS_USER = "admin"
-_DORIS_PASSWORD = ""
 _DORIS_DB = "system_mcp"
+
+# Request-scoped credential override. Set once at the start of each
+# authenticated request, read by _get_conn(). Destroyed when the
+# asyncio Task ends — no cross-request leakage.
+_request_creds: contextvars.ContextVar[tuple[str, str] | None] = \
+    contextvars.ContextVar('_doris_store_creds', default=None)
+
+
+def set_request_credentials(user: str, password: str) -> None:
+    """Inject Doris credentials for the current request.
+
+    Called once at request entry (CredentialVerifier or HTTP auth).
+    The credentials live only for the duration of this asyncio Task.
+    """
+    _request_creds.set((user, password))
 
 
 def set_doris_port(port: int) -> None:
@@ -63,10 +77,18 @@ def set_doris_port(port: int) -> None:
 
 
 def _get_conn() -> pymysql.Connection:
+    creds = _request_creds.get()
+    if creds is None:
+        raise RuntimeError(
+            "No Doris credentials in request context. "
+            "Ensure the request carries a valid Bearer token or session cookie."
+        )
+    user, password = creds
     return pymysql.connect(
         host=_DORIS_HOST, port=_DORIS_PORT,
-        user=_DORIS_USER, password=_DORIS_PASSWORD,
+        user=user, password=password,
         charset="utf8mb4", autocommit=True,
+        connect_timeout=5,
     )
 
 

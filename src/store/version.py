@@ -19,9 +19,6 @@ class SemanticLayerVersion:
     loaded_at: str
     """ISO8601 timestamp of when this version was loaded — the sole external identifier."""
 
-    loaded_epoch: float
-    """Epoch seconds of when this version was loaded — for cooldown comparison."""
-
     revision: str
     """Store-returned opaque revision (for equality comparison)."""
 
@@ -30,6 +27,9 @@ class SemanticLayerVersion:
 
     source_uri: str
     """Human-readable source location (for logs)."""
+
+    loaded_epoch: float = field(default_factory=time.time)
+    """Epoch timestamp for cooldown comparison (not serialized)."""
 
     version_label: str | None = None
     """Store-provided human-readable label (e.g. .version content, git tag)."""
@@ -86,6 +86,16 @@ class VersionTracker:
                     metric_count=self._version.metric_count,
                     last_reload_success=False,
                 )
+
+    def touch_epoch(self) -> None:
+        """Bump loaded_epoch to now without replacing the version identity.
+
+        Used when check_remote shows no revision change — resets the
+        cooldown clock without a full reload.
+        """
+        with self._lock:
+            if self._version:
+                self._version.loaded_epoch = time.time()
 
     def to_external_dict(self) -> dict:
         """Return the version info for health/tool responses. Only loaded_at."""

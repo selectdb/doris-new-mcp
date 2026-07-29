@@ -27,26 +27,6 @@ from tools.query import execute_query as _execute_query
 logger = logging.getLogger("doris_new_mcp")
 
 
-def _try_grant_select_priv(host: str, port: int, admin_password: str) -> tuple[bool, str]:
-    """Grant SELECT_PRIV on *.* to all users (idempotent, one-time init).
-
-    Called once at startup under ``seed_example=true``.
-    Returns (True, "") on success, (False, error_message) on failure.
-    Does NOT raise — failures are always non-fatal.
-    """
-    import pymysql
-    try:
-        conn = pymysql.connect(
-            host=host, port=port,
-            user="admin", password=admin_password,
-            charset="utf8mb4", connect_timeout=5,
-        )
-        conn.cursor().execute("GRANT SELECT_PRIV ON *.* TO '%'")
-        conn.close()
-        return True, ""
-    except Exception as e:
-        return False, str(e)
-
 
 def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
     """Create and configure the MCP server."""
@@ -66,25 +46,56 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     _ws_root = _Path(workspace_dir) / "workspaces"
     _ws_root.mkdir(parents=True, exist_ok=True)
 
-    # Seed example workspace on first boot (configurable)
-    if cfg.mcp.seed_example:
-        from store.seed import seed_all, set_doris_port as seed_set_port, set_doris_password as seed_set_password
-        seed_set_port(cc.fe_mysql_port)
-        seed_set_password(cc.fe_password)
-        _seeded = seed_all()
+    # ── Lazy seed: deferred to first authenticated request ──
+    _seeded = False
+    _seed_lock = asyncio.Lock()
+
+    async def _ensure_seeded(user: str, password: str) -> None:
+        """Seed example workspace + init watcher on first authenticated request.
+
+        Idempotent — runs at most once across all requests.  Uses the
+        caller's credentials so the store layer can connect to Doris.
+        """
+        nonlocal _seeded
         if _seeded:
-            logger.info("Example workspace seeded (data + models)")
+            return
+        async with _seed_lock:
+            if _seeded:
+                return
+            from store.store import set_request_credentials as _set_creds
+            _set_creds(user, password)
+            try:
+                # 1. Seed example data/models if configured
+                if cfg.mcp.seed_example:
+                    from store.seed import seed_all, set_doris_port as seed_set_port
+                    seed_set_port(cc.fe_mysql_port)
+                    performed = seed_all()
+                    if performed:
+                        logger.info("Example workspace seeded (lazy, on first request)")
+                    else:
+                        logger.info("Example workspace already seeded, nothing to do")
+                    # One-time: grant read-only access to all users (idempotent)
+                    try:
+                        import pymysql as _pymysql
+                        _conn = _pymysql.connect(
+                            host="127.0.0.1", port=cc.fe_mysql_port,
+                            user=user, password=password,
+                            charset="utf8mb4", connect_timeout=5,
+                        )
+                        _conn.cursor().execute("GRANT SELECT_PRIV ON *.* TO '%'")
+                        _conn.close()
+                        logger.info("GRANT SELECT_PRIV ON *.* TO '%' — done")
+                    except Exception as _e:
+                        logger.debug("GRANT skipped (non-fatal): %s", _e)
+                # 2. Discover and init all workspaces
+                multi_watcher.initialize()
+                logger.info(f"Watcher initialized: {multi_watcher.workspace_names()}")
+            except Exception:
+                logger.exception("Lazy init failed — workspace may be empty")
+            finally:
+                _seeded = True
 
-        # One-time: grant read-only access to all users (idempotent, persisted in Doris)
-        ok, err = _try_grant_select_priv(cc.fe_host, cc.fe_mysql_port, cc.fe_password)
-        if ok:
-            logger.info("GRANT SELECT_PRIV ON *.* TO '%' — done")
-        else:
-            logger.debug("GRANT skipped (non-fatal): %s", err)
-    else:
-        logger.info("Example workspace seeding disabled (seed_example=false)")
-
-    # Multi-workspace watcher
+    # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
     from store.store import set_doris_port, set_doris_password
     set_doris_port(cc.fe_mysql_port)
@@ -94,7 +105,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         workspace_root=_ws_root,
         app_config=cfg,
     )
-    logger.info(f"Multi-workspace watcher ready: {multi_watcher.workspace_names()}")
+    logger.info("Multi-workspace watcher created (lazy init)")
 
     # Setup logging: write to workspace/logs/server.log + stderr
     import logging as _logging
@@ -132,23 +143,11 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     os.makedirs(os.path.dirname(audit_path), exist_ok=True)
     init_audit_log(audit_path, when=cfg.mcp.log_rotation_when, backup_count=cfg.mcp.log_rotation_backup_count)
 
-    # Admin pool: for semantic files, workspace management, periodic checks.
-    # min=1 (always keep one alive), max=10, idle=300s.
-    admin_pool = ConnectionPool(
-        cc,
-        user="admin",
-        password=cc.fe_password,
-        min_size=0,
-        max_size=10,
-    )
-
-    # Per-user pool manager (for credential-authenticated SQL queries)
+    # Per-user pool manager — all Doris connections use request credentials.
     pool_manager: PoolManager | None = PoolManager(cc)
 
     init_guard(
         pool_manager=pool_manager,
-        service_pool=admin_pool,
-        oauth_provider=None,
         transport="streamable-http",
     )
 
@@ -180,8 +179,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         ok, _ = await asyncio.to_thread(_verify_doris_credentials, user, password)
         return ok
 
-    auth_provider = CredentialVerifier(_credential_cache, _async_verify_credentials)
-    logger.info("Auth: CredentialVerifier registered (username:password, 10-min cache)")
+    auth_provider = CredentialVerifier(_credential_cache, _async_verify_credentials,
+                                        on_authenticated=_ensure_seeded)
+    logger.info("Auth: CredentialVerifier registered (username:password, 10-min cache, lazy seed)")
 
     # Helper: get store for a workspace (defaults to "example")
     def _get_workspace_from_request(request: Request) -> str:
@@ -202,31 +202,30 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     _webui_sessions: dict[str, dict] = {}
     _SESSION_TTL = 24 * 3600  # 24 hours
 
-    async def _get_per_user_pool(fallback_pool: ConnectionPool) -> ConnectionPool:
-        """Extract per-user pool from Bearer token if available.
+    async def _get_per_user_pool() -> ConnectionPool:
+        """Return a per-user connection pool from the request Bearer token.
 
-        Returns the per-user pool connected via non-127.0.0.1 machine IP.
-        If the pool's first connection fails with an auth error, clears the
-        credential cache so the next request re-verifies against Doris.
-        Falls back to admin pool on any failure.
+        Credentials are extracted from the FastMCP auth context (set by
+        CredentialVerifier).  Raises RuntimeError if no valid token is
+        present — there is no fallback to a shared admin pool.
         """
         if pool_manager is None:
-            return fallback_pool
-        try:
-            from mcp.server.auth.middleware.auth_context import get_access_token
-            access_token = get_access_token()
-            if access_token and access_token.client_id:
-                token_str = access_token.token
-                parts = token_str.split(":", 1)
-                username = access_token.client_id
-                password = parts[1] if len(parts) > 1 else ""
-                return await pool_manager.get_or_create_local_pool(
-                    username, password, host=_MACHINE_IP,
-                    on_auth_error=lambda: _credential_cache.clear(username, password),
-                )
-        except Exception as e:
-            logger.debug("Failed to get per-user pool, falling back to admin: %s", e)
-        return fallback_pool
+            raise RuntimeError("PoolManager not initialized")
+        from mcp.server.auth.middleware.auth_context import get_access_token
+        access_token = get_access_token()
+        if not access_token or not access_token.client_id:
+            raise RuntimeError(
+                "No credentials in request context — "
+                "ensure the request carries a valid Bearer token."
+            )
+        token_str = access_token.token
+        parts = token_str.split(":", 1)
+        username = access_token.client_id
+        password = parts[1] if len(parts) > 1 else ""
+        return await pool_manager.get_or_create_local_pool(
+            username, password, host=_MACHINE_IP,
+            on_auth_error=lambda: _credential_cache.clear(username, password),
+        )
 
     def _get_machine_ip() -> str:
         import socket
@@ -272,6 +271,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
                         status_code=403)
+                from store.store import set_request_credentials
+                set_request_credentials(client_id, session.get("doris_password", ""))
+                await _ensure_seeded(client_id, session.get("doris_password", ""))
                 return client_id, is_admin, None
             del _webui_sessions[session_id]
 
@@ -288,6 +290,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
                         status_code=403)
+                from store.store import set_request_credentials
+                set_request_credentials(username, password)
+                await _ensure_seeded(username, password)
                 return username, is_admin, None
             return None, False, JSONResponse(
                 {"success": False, "error": {"code": "UNAUTHORIZED", "message": "Invalid credentials"}},
@@ -328,11 +333,6 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                     await pool_manager.close_all()
                 except Exception:
                     logger.exception("Failed during pool_manager.close_all()")
-            if admin_pool is not None:
-                try:
-                    await admin_pool.close()
-                except Exception:
-                    logger.exception("Failed during admin_pool.close()")
             logger.info("All Doris connection pools closed")
 
     mcp = FastMCP(
@@ -374,7 +374,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _get_per_user_pool()
         result = await _list_databases(pool, page_size, page_token or None, cc.db_whitelist or None)
         log_tool_call("list_databases", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -394,7 +394,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         start = time.monotonic()
         if cc.db_whitelist and database not in cc.db_whitelist:
             return error_response(ErrorCode.PERMISSION_DENIED, f"Database '{database}' not in whitelist")
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _get_per_user_pool()
         result = await _list_tables(pool, database, like or None, page_size, page_token or None)
         log_tool_call("list_tables", client_id=auth.client_id, params={"database": database},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -409,7 +409,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _get_per_user_pool()
         result = await _describe_table(pool, database, table, detail_level)
         log_tool_call("describe_table", client_id=auth.client_id, params={"database": database, "table": table},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -425,7 +425,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
 
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _get_per_user_pool()
 
         start = time.monotonic()
         result = await _execute_query(pool, sql, database or None, max_rows or None)
@@ -449,11 +449,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
             return auth.denied
         start = time.monotonic()
 
-        # Verify Doris DB connectivity
+        # Verify Doris DB connectivity (use per-user pool with request credentials)
         db_ok = False
         db_error = ""
+        health_pool = await _get_per_user_pool()
         try:
-            await admin_pool.execute("SELECT 1")
+            await health_pool.execute("SELECT 1")
             db_ok = True
         except Exception as e:
             db_error = str(e)
@@ -580,7 +581,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if where:
             where = ws.compiler.resolve_where(metrics, where)
 
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _get_per_user_pool()
 
         result = await _query_metric(ws.compiler, pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
         duration = (time.monotonic() - start) * 1000
@@ -839,6 +840,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         session_id = _secrets.token_urlsafe(32)
         _webui_sessions[session_id] = {
             "doris_user": user,
+            "doris_password": password,
             "created_at": time.time(),
             "is_admin": is_admin,
         }

@@ -20,7 +20,7 @@ import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 # ── Minimal stubs to avoid importing the full server chain ──
@@ -155,7 +155,7 @@ class TestEnsureFreshCooldown(unittest.TestCase):
             return original_check()
         ws.store.check_remote = counting_check
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result)
         self.assertEqual(call_count[0], 0,
@@ -187,7 +187,7 @@ class TestEnsureFreshCooldown(unittest.TestCase):
         ws.store._revision = "abc123"
         self.watcher._workspaces["test"] = ws
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result)
         # epoch should be bumped
@@ -240,7 +240,7 @@ class TestEnsureFreshCooldown(unittest.TestCase):
             ))
         self.watcher._reload_workspace = fake_reload
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result)
         self.assertEqual(len(reload_called), 1, "Should trigger reload")
@@ -278,7 +278,7 @@ class TestEnsureFreshCooldown(unittest.TestCase):
             ))
         self.watcher._reload_workspace = fake_reload
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result)
         self.assertEqual(len(reload_called), 1,
@@ -335,7 +335,7 @@ class TestEnsureFreshConcurrency(unittest.TestCase):
             reload_called.append(w.name)
         self.watcher._reload_workspace = fake_reload
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result)
         self.assertEqual(len(reload_called), 0,
@@ -361,7 +361,7 @@ class TestEnsureFreshConcurrency(unittest.TestCase):
         reload_called = []
         self.watcher._reload_workspace = lambda w: reload_called.append(w.name)
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result, "Should return ws even with None manifest")
         self.assertEqual(len(reload_called), 0,
@@ -386,10 +386,9 @@ class TestEnsureFreshDiscovery(unittest.TestCase):
 
     def test_unknown_workspace_returns_none(self):
         """When workspace is not in memory and discovery also fails, return None."""
-        # Stub _discover_workspace to simulate "not found in Doris"
-        self.watcher._discover_workspace = lambda name: None
-
-        result = self.watcher.ensure_fresh("no_such_ws", ttl=60.0)
+        from store.store import DorisStore
+        with patch.object(DorisStore, 'discover_workspaces', return_value=[]):
+            result = self.watcher.ensure_fresh("no_such_ws")
         self.assertIsNone(result)
 
     # ── Test 8: discover new workspace on demand ──
@@ -411,22 +410,23 @@ class TestEnsureFreshDiscovery(unittest.TestCase):
                 metric_count=5,
             ))
 
-        # Stub _discover_workspace to simulate "found in Doris"
-        def fake_discover(name):
-            ws = _make_workspace_state(
-                name=name,
-                manifest=None,
-                compiler=None,
-                known_revision="",
-                version=None,
-            )
-            self.watcher._workspaces[name] = ws
-            return ws
-
-        self.watcher._discover_workspace = fake_discover
         self.watcher._reload_workspace = fake_reload
 
-        result = self.watcher.ensure_fresh("new_ws", ttl=60.0)
+        # Stub _init_workspace to avoid real Doris connection
+        def fake_init(name, first_load=False):
+            ws = _make_workspace_state(
+                name=name, manifest=None, compiler=None,
+                known_revision="", version=None,
+            )
+            self.watcher._workspaces[name] = ws
+            if first_load:
+                self.watcher._reload_workspace(ws)
+            return ws
+        self.watcher._init_workspace = fake_init
+
+        from store.store import DorisStore
+        with patch.object(DorisStore, 'discover_workspaces', return_value=["new_ws"]):
+            result = self.watcher.ensure_fresh("new_ws")
 
         self.assertIsNotNone(result)
         self.assertIsNotNone(result.manifest)
@@ -471,7 +471,7 @@ class TestEnsureFreshGracefulDegradation(unittest.TestCase):
         ws.store.check_remote = MagicMock(side_effect=RuntimeError("Doris down"))
         self.watcher._workspaces["test"] = ws
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result, "Should return cached ws when Doris down")
         self.assertIsNotNone(result.manifest)
@@ -490,7 +490,7 @@ class TestEnsureFreshGracefulDegradation(unittest.TestCase):
         ws.store.check_remote = MagicMock(side_effect=RuntimeError("Doris down"))
         self.watcher._workspaces["test"] = ws
 
-        result = self.watcher.ensure_fresh("test", ttl=60.0)
+        result = self.watcher.ensure_fresh("test")
 
         self.assertIsNone(result)
 
@@ -526,7 +526,7 @@ class TestEnsureFreshGracefulDegradation(unittest.TestCase):
         self.watcher._reload_workspace = failing_reload
 
         with self.assertRaises(RuntimeError):
-            self.watcher.ensure_fresh("test", ttl=60.0)
+            self.watcher.ensure_fresh("test")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -573,7 +573,7 @@ class TestEnsureFreshMultipleCalls(unittest.TestCase):
                                            or original())
 
         for _ in range(10):
-            result = self.watcher.ensure_fresh("test", ttl=60.0)
+            result = self.watcher.ensure_fresh("test")
             self.assertIsNotNone(result)
 
         self.assertEqual(check_count[0], 0,
@@ -602,7 +602,7 @@ class TestEnsureFreshMultipleCalls(unittest.TestCase):
         self.watcher._workspaces["test"] = ws
 
         # First call: cooldown expired, checks revision
-        result1 = self.watcher.ensure_fresh("test", ttl=60.0)
+        result1 = self.watcher.ensure_fresh("test")
         self.assertIsNotNone(result1)
 
         epoch_after_first = ws.version_tracker.current.loaded_epoch
@@ -612,7 +612,7 @@ class TestEnsureFreshMultipleCalls(unittest.TestCase):
         ws.store.check_remote = lambda: (check_count.__setitem__(0, check_count[0] + 1)
                                           or MagicMock(revision="abc123"))
 
-        result2 = self.watcher.ensure_fresh("test", ttl=60.0)
+        result2 = self.watcher.ensure_fresh("test")
         self.assertIsNotNone(result2)
         self.assertEqual(check_count[0], 0,
                          "Second call within cooldown should not check store")
