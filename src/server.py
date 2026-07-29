@@ -97,9 +97,8 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
     # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
-    from store.store import set_doris_port, set_doris_password
+    from store.store import set_doris_port
     set_doris_port(cc.fe_mysql_port)
-    set_doris_password(cc.fe_password)
     multi_watcher = MultiWorkspaceWatcher(
         config_dir=_Path(config_path),
         workspace_root=_ws_root,

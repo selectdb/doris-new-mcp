@@ -61,6 +61,52 @@ _detect_native() {
     echo "${os}-${arch}"
 }
 
+# pip --platform tag for a target label (used for cross-builds)
+_pip_platform_tag() {
+    case "$1" in
+        linux-x64)    echo "manylinux2014_x86_64" ;;
+        linux-arm64)  echo "manylinux2014_aarch64" ;;
+        macos-x64)    echo "macosx_10_9_x86_64" ;;
+        macos-arm64)  echo "macosx_11_0_arm64" ;;
+        *) _error "No pip platform tag for '$1'"; exit 1 ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════════════
+# _install_deps_cross — 交叉安装依赖（不执行目标平台二进制）
+#
+# pip --target 只是解压 wheel 到目录，不需要运行目标平台的解释器，
+# 因此可以在 macOS 上为 Linux 构建，反之亦然。
+# ════════════════════════════════════════════════════════════════════
+_install_deps_cross() {
+    local platform_label="$1"
+    local site_packages="$PYTHON_DIR/lib/python${PY_VERSION%.*}/site-packages"
+    local pip_tag
+    pip_tag="$(_pip_platform_tag "$platform_label")"
+
+    local host_py=""
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 &&
+           "$candidate" -m pip --version >/dev/null 2>&1; then
+            host_py="$candidate"; break
+        fi
+    done
+    if [ -z "$host_py" ]; then
+        _error "Cross-build needs a host Python with pip (python3 -m pip)"
+        exit 1
+    fi
+
+    _info "Cross-installing dependencies for $platform_label (tag: $pip_tag) ..."
+    mkdir -p "$site_packages"
+    "$host_py" -m pip install --quiet --upgrade \
+        --platform "$pip_tag" \
+        --python-version "${PY_VERSION%.*}" \
+        --only-binary :all: \
+        --target "$site_packages" \
+        -r "$REQUIREMENTS"
+    _info "Dependencies installed into $site_packages"
+}
+
 # ════════════════════════════════════════════════════════════════════
 # _ensure_python — 确保 python/ 有 Python 3.10 + 全部依赖
 #
@@ -68,19 +114,38 @@ _detect_native() {
 # 然后尝试下载 python-build-standalone
 # ════════════════════════════════════════════════════════════════════
 _ensure_python() {
-    local platform="$1"
+    local platform_label="$1"
+    local platform="$2"
+    local native_label
+    native_label="$(_detect_native)"
+    local is_cross="false"
+    [ "$platform_label" != "$native_label" ] && is_cross="true"
 
-    if [ -x "$PYTHON_DIR/bin/python3" ] && "$PYTHON_DIR/bin/python3" --version >/dev/null 2>&1; then
-        _info "Python ready: $("$PYTHON_DIR/bin/python3" --version 2>&1)"
-        return 0
+    local stamp="$PYTHON_DIR/.build-platform"
+
+    # Reuse an existing python/ only if it was built for this same target.
+    if [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$platform_label" ]; then
+        if [ "$is_cross" = "true" ]; then
+            _info "Python ready (cross-built for $platform_label)"
+            return 0
+        fi
+        if [ -x "$PYTHON_DIR/bin/python3" ] && "$PYTHON_DIR/bin/python3" --version >/dev/null 2>&1; then
+            _info "Python ready: $("$PYTHON_DIR/bin/python3" --version 2>&1)"
+            return 0
+        fi
     fi
     if [ -d "$PYTHON_DIR" ]; then
-        _warn "Python not runnable on this platform, re-creating..."
+        _warn "python/ is stale or for another platform, re-creating..."
         rm -rf "$PYTHON_DIR"
     fi
 
-    # ── Fallback 1: use system/conda Python if provided ──
-    if [ -n "${DORIS_MCP_SYSTEM_PYTHON:-}" ] && [ -x "$DORIS_MCP_SYSTEM_PYTHON" ]; then
+    if [ "$is_cross" = "true" ]; then
+        _info "Cross-build: host=$native_label → target=$platform_label"
+    fi
+
+    # ── Fallback 1: use system/conda Python if provided (native builds only) ──
+    if [ "$is_cross" = "false" ] && \
+       [ -n "${DORIS_MCP_SYSTEM_PYTHON:-}" ] && [ -x "$DORIS_MCP_SYSTEM_PYTHON" ]; then
         _info "Using system Python: $DORIS_MCP_SYSTEM_PYTHON"
         local py_ver
         py_ver=$("$DORIS_MCP_SYSTEM_PYTHON" --version 2>&1)
@@ -111,6 +176,7 @@ _ensure_python() {
         "$PYTHON_DIR/bin/python3" -m pip install --quiet --upgrade pip 2>/dev/null || true
         "$PYTHON_DIR/bin/python3" -m pip install --quiet -r "$REQUIREMENTS"
         _info "Dependencies installed."
+        echo "$platform_label" > "$stamp"
         return 0
     fi
 
@@ -152,21 +218,29 @@ _ensure_python() {
     mkdir -p "$PYTHON_DIR"
     tar xzf "$tarball" -C "$PYTHON_DIR" --strip-components=1
 
-    if [ ! -x "$PYTHON_DIR/bin/python3" ] && [ -x "$PYTHON_DIR/bin/python3.10" ]; then
+    # bin/python3 may be missing (only python3.10 shipped) — link it.
+    if [ ! -e "$PYTHON_DIR/bin/python3" ] && [ -e "$PYTHON_DIR/bin/python3.10" ]; then
         ln -sf python3.10 "$PYTHON_DIR/bin/python3"
     fi
-    if [ ! -x "$PYTHON_DIR/bin/python3" ]; then
-        _error "Python binary not found"; exit 1
+    if [ ! -e "$PYTHON_DIR/bin/python3" ]; then
+        _error "Python binary not found in extracted tarball"; exit 1
     fi
-    _info "Python $("$PYTHON_DIR/bin/python3" --version) ready"
 
-    if ! "$PYTHON_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
-        "$PYTHON_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || true
+    if [ "$is_cross" = "true" ]; then
+        # Target binaries can't run here — install wheels by extraction only.
+        _install_deps_cross "$platform_label"
+    else
+        _info "Python $("$PYTHON_DIR/bin/python3" --version) ready"
+        if ! "$PYTHON_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
+            "$PYTHON_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || true
+        fi
+        _info "Installing dependencies ..."
+        "$PYTHON_DIR/bin/python3" -m pip install --quiet --upgrade pip 2>/dev/null || true
+        "$PYTHON_DIR/bin/python3" -m pip install --quiet -r "$REQUIREMENTS"
+        _info "Dependencies installed."
     fi
-    _info "Installing dependencies ..."
-    "$PYTHON_DIR/bin/python3" -m pip install --quiet --upgrade pip 2>/dev/null || true
-    "$PYTHON_DIR/bin/python3" -m pip install --quiet -r "$REQUIREMENTS"
-    _info "Dependencies installed."
+
+    echo "$platform_label" > "$stamp"
 }
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -218,7 +292,7 @@ build() {
     local platform_label="${1%%|*}"
     local platform_url="${1##*|}"
 
-    _ensure_python "$platform_url"
+    _ensure_python "$platform_label" "$platform_url"
 
     rm -rf "$DIST_DIR"
     mkdir -p "$DIST_DIR"
