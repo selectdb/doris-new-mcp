@@ -8,9 +8,8 @@
 #          ./build.sh macos-arm64      # macOS Apple Silicon
 #          ./build.sh                  # 自动检测当前平台
 #
-#   每次构建产出两个自包含包：
+#   每次构建产出一个自包含全量包（server + client + 文档 + Python 运行时）：
 #     dist/doris-mcp-server-{version}-{platform}.tar.gz
-#     dist/doris-mcp-client-{version}-{platform}.tar.gz
 #
 #   清理：  ./build.sh clean
 # =============================================================================
@@ -252,7 +251,7 @@ _ensure_python() {
 # 通过 staging 目录打包，使解压后的顶层目录名 == 包名（如 doris-mcp-server/），
 # 与部署脚本的 ${WORK_DIR}/${name} 约定一致。
 _pack() {
-    local name="$1"         # doris-mcp-server or doris-mcp-client
+    local name="$1"         # doris-mcp-server
     local platform="$2"
     shift 2                 # 剩下的参数是相对 SCRIPT_DIR 的路径
     local pkg_name="${name}-${VERSION}-${platform}"
@@ -291,7 +290,10 @@ _pack() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════
-# build — 构建 server + client 两个包
+# build — 构建单个全量包（server + client + 文档 + Python 运行时）
+#
+# 顶层目录名保持 doris-mcp-server/，与现有部署脚本的
+# ${WORK_DIR}/doris-mcp-server 约定一致，部署脚本无需改动。
 # ═════════════════════════════════════════════════════════════════════════
 build() {
     local platform_label="${1%%|*}"
@@ -302,26 +304,26 @@ build() {
     rm -rf "$DIST_DIR"
     mkdir -p "$DIST_DIR"
 
-    # ── Server 包 ──
     _pack "doris-mcp-server" "$platform_label" \
         src \
         mcp-server.toml \
-        start-mcp-server.sh
-
-    # ── Client 包 ──
-    _pack "doris-mcp-client" "$platform_label" \
+        start-mcp-server.sh \
         mcp-client \
-        mcp-client.sh
+        mcp-client.sh \
+        README.md \
+        INSTALL.html \
+        doris-mcp-docs.html
 
     echo ""
     echo "  ────────────────────────────────────────────"
     echo "  Build complete!  Platform: $platform_label"
     echo ""
-    echo "  Server:  tar xzf doris-mcp-server-${VERSION}-${platform_label}.tar.gz"
-    echo "           cd doris-mcp-server && ./start-mcp-server.sh"
+    echo "  tar xzf doris-mcp-server-${VERSION}-${platform_label}.tar.gz"
+    echo "  cd doris-mcp-server"
     echo ""
-    echo "  Client:  tar xzf doris-mcp-client-${VERSION}-${platform_label}.tar.gz"
-    echo "           cd doris-mcp-client && ./mcp-client.sh ..."
+    echo "    Server:  ./start-mcp-server.sh"
+    echo "    Client:  ./mcp-client.sh ..."
+    echo "    Docs:    README.md, INSTALL.html, doris-mcp-docs.html"
     echo ""
     echo "  No network, no pip, no system Python needed."
     echo "  ────────────────────────────────────────────"
@@ -362,9 +364,9 @@ case "${1:-}" in
         echo ""
         echo "  No argument = auto-detect and build"
         echo ""
-        echo "  Produces two packages in dist/:"
+        echo "  Produces one all-in-one package in dist/:"
         echo "    doris-mcp-server-{version}-{platform}.tar.gz"
-        echo "    doris-mcp-client-{version}-{platform}.tar.gz"
+        echo "    (server + client + docs + Python runtime)"
         exit 1
         ;;
 esac
