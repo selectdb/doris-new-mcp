@@ -1152,7 +1152,24 @@ function wsAction(url,label) {
         filename = request.path_params["filename"]
         if filename.endswith("/delete"):
             filename = filename[:-len("/delete")]
-        action = _get_store(ws).staging_delete(filename)
+
+        # Check cross-file dependencies before staging the delete
+        from tools.dependency import check_delete_dependencies
+        store = _get_store(ws)
+        file_info = store.get_file(filename)
+        if file_info and file_info.get("content"):
+            active_files = {}
+            for f in store.list_files():
+                f_info = store.get_file(f["filename"])
+                if f_info and f_info.get("content"):
+                    active_files[f["filename"]] = f_info["content"]
+            errors = check_delete_dependencies(filename, file_info["content"], active_files)
+            if errors:
+                from starlette.responses import HTMLResponse as _HTML
+                body = "<h2>Cannot Delete</h2><ul>" + "".join(f"<li>{e}</li>" for e in errors) + "</ul>"
+                return _HTML(_render_page(body, client_id, True, ws), status_code=409)
+
+        action = store.staging_delete(filename)
         return _Redirect(f"/mcp/web/models?workspace={ws}&staged=1", status_code=303)
 
     @mcp.custom_route("/mcp/web/{filename:path}/save", methods=["POST"])
@@ -1360,7 +1377,27 @@ function wsAction(url,label) {
             return err
         ws = _get_workspace_from_request(request)
         filename = request.path_params["filename"]
-        action = _get_store(ws).staging_delete(filename)
+
+        # Check cross-file dependencies before staging the delete
+        from tools.dependency import check_delete_dependencies
+        store = _get_store(ws)
+        file_info = store.get_file(filename)
+        if file_info and file_info.get("content"):
+            active_files = {}
+            for f in store.list_files():
+                f_info = store.get_file(f["filename"])
+                if f_info and f_info.get("content"):
+                    active_files[f["filename"]] = f_info["content"]
+            errors = check_delete_dependencies(filename, file_info["content"], active_files)
+            if errors:
+                log_tool_call("semantic_delete", client_id=client_id,
+                              params={"filename": filename}, success=False, duration_ms=0)
+                return _JSONResponse(
+                    {"success": False, "error": {"code": "DEPENDENCY_CONFLICT", "message": errors}},
+                    status_code=409,
+                )
+
+        action = store.staging_delete(filename)
         log_tool_call("semantic_delete", client_id=client_id,
                       params={"filename": filename, "action": action}, success=True, duration_ms=0)
         return _JSONResponse({"success": True, "data": {"filename": filename, "action": action}})
