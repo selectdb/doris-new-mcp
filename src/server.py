@@ -99,7 +99,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                         _conn.close()
                         logger.info("GRANT SELECT_PRIV ON *.* TO '%' — done")
                     except Exception as _e:
-                        logger.debug("GRANT skipped (non-fatal): %s", _e)
+                        logger.error(
+                            "GRANT SELECT_PRIV ON *.* TO '%%' failed — non-admin "
+                            "users will get permission errors on query: %s", _e,
+                        )
                 # 2. Discover and init all workspaces
                 multi_watcher.initialize()
                 logger.info(f"Watcher initialized: {multi_watcher.workspace_names()}")
