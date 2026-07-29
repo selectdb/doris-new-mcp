@@ -107,9 +107,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                 multi_watcher.initialize()
                 logger.info(f"Watcher initialized: {multi_watcher.workspace_names()}")
             except Exception:
-                logger.exception("Lazy init failed — workspace may be empty")
-            finally:
-                _seeded = True
+                # Leave _seeded unset so the next request retries.  Marking it
+                # done here would strand the server with an empty workspace
+                # until restart.
+                logger.exception("Lazy init failed — will retry on next request")
+                return
+            _seeded = True
 
     # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
