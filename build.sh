@@ -246,43 +246,48 @@ _ensure_python() {
 # ═════════════════════════════════════════════════════════════════════════
 # _pack — 打包单个目标
 # ═════════════════════════════════════════════════════════════════════════
+#
+# 用法: _pack <包名> <平台> <相对 SCRIPT_DIR 的路径...>
+#
+# 通过 staging 目录打包，使解压后的顶层目录名 == 包名（如 doris-mcp-server/），
+# 与部署脚本的 ${WORK_DIR}/${name} 约定一致。
 _pack() {
     local name="$1"         # doris-mcp-server or doris-mcp-client
     local platform="$2"
-    shift 2                 # 剩下的参数是需要打包的额外路径
+    shift 2                 # 剩下的参数是相对 SCRIPT_DIR 的路径
     local pkg_name="${name}-${VERSION}-${platform}"
     local outfile="$DIST_DIR/${pkg_name}.tar.gz"
 
     _info "Packing: ${pkg_name}.tar.gz"
 
-    local parent_dir base_name
-    parent_dir="$(dirname "$SCRIPT_DIR")"
-    base_name="$(basename "$SCRIPT_DIR")"
+    local stage="$DIST_DIR/.stage"
+    local root="$stage/$name"
+    rm -rf "$stage"
+    mkdir -p "$root"
 
-    cd "$parent_dir"
-    tar czf "$outfile" \
-        --exclude='.git' \
-        --exclude='.gitignore' \
-        --exclude='__pycache__' \
-        --exclude='*.pyc' \
-        --exclude='*.pyo' \
-        --exclude='dist' \
-        --exclude='build' \
-        --exclude='*.egg-info' \
-        --exclude='.DS_Store' \
-        --exclude='python/include' \
-        --exclude='python/share' \
-        --exclude='python/lib/python3.10/test' \
-        --exclude='python/lib/python3.10/idlelib' \
-        --exclude='python/lib/python3.10/turtledemo' \
-        --exclude='python/lib/python3.10/tkinter' \
-        --exclude='python/lib/python3.10/ensurepip' \
-        "$base_name/"python \
-        "$@"
+    # python/ 是所有包的公共部分
+    cp -a "$PYTHON_DIR" "$root/python"
+    for item in "$@"; do
+        cp -a "$SCRIPT_DIR/$item" "$root/"
+    done
+
+    # 瘦身：移除不需要随包分发的内容
+    rm -rf "$root/python/include" "$root/python/share" \
+           "$root/python/lib/python3.10/test" \
+           "$root/python/lib/python3.10/idlelib" \
+           "$root/python/lib/python3.10/turtledemo" \
+           "$root/python/lib/python3.10/tkinter" \
+           "$root/python/lib/python3.10/ensurepip" \
+           "$root/python/.build-platform"
+    find "$root" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    find "$root" \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+
+    ( cd "$stage" && tar czf "$outfile" "$name" )
+    rm -rf "$stage"
 
     local size
     size="$(du -sh "$outfile" | cut -f1)"
-    echo "        ${pkg_name}.tar.gz  (${size})"
+    echo "        ${pkg_name}.tar.gz  (${size})  →  解压为 ${name}/"
 }
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -297,30 +302,26 @@ build() {
     rm -rf "$DIST_DIR"
     mkdir -p "$DIST_DIR"
 
-    local parent_dir base_name
-    parent_dir="$(dirname "$SCRIPT_DIR")"
-    base_name="$(basename "$SCRIPT_DIR")"
-
     # ── Server 包 ──
     _pack "doris-mcp-server" "$platform_label" \
-        "$base_name/"src \
-        "$base_name/"mcp-server.toml \
-        "$base_name/"start-mcp-server.sh
+        src \
+        mcp-server.toml \
+        start-mcp-server.sh
 
     # ── Client 包 ──
     _pack "doris-mcp-client" "$platform_label" \
-        "$base_name/"mcp-client \
-        "$base_name/"mcp-client.sh
+        mcp-client \
+        mcp-client.sh
 
     echo ""
     echo "  ────────────────────────────────────────────"
     echo "  Build complete!  Platform: $platform_label"
     echo ""
     echo "  Server:  tar xzf doris-mcp-server-${VERSION}-${platform_label}.tar.gz"
-    echo "           cd ${base_name} && ./start-mcp-server.sh"
+    echo "           cd doris-mcp-server && ./start-mcp-server.sh"
     echo ""
     echo "  Client:  tar xzf doris-mcp-client-${VERSION}-${platform_label}.tar.gz"
-    echo "           cd ${base_name} && ./mcp-client.sh ..."
+    echo "           cd doris-mcp-client && ./mcp-client.sh ..."
     echo ""
     echo "  No network, no pip, no system Python needed."
     echo "  ────────────────────────────────────────────"
