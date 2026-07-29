@@ -10,7 +10,10 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolAnnotations
+# ToolAnnotations is defined in mcp.types. `fastmcp.tools.tool` resolves at
+# runtime only through a compatibility shim — that module has no file on disk
+# in fastmcp 3.4, so importing from it breaks whenever the shim is dropped.
+from mcp.types import ToolAnnotations
 
 if TYPE_CHECKING:
     # Names used only in annotations. The handlers import what they need at
@@ -489,7 +492,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
-    async def check_service_health(detail: bool = False) -> str:
+    async def check_service_health() -> str:
         """FIRST TOOL to call at the start of any session. Returns doris connectivity and all workspace statuses. Use to determine which workspaces are available."""
         auth = check_tool_access("check_service_health")
         if auth.denied:
