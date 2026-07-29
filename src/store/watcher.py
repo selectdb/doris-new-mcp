@@ -342,12 +342,16 @@ class MultiWorkspaceWatcher:
         if current is not None and time.time() - current.loaded_epoch < self._FRESHNESS_TTL:
             return ws
 
-        # Check if revision changed
+        # Check if revision changed.  A failure here means we cannot tell
+        # whether the loaded manifest is current; serving it anyway would
+        # hand back silently-outdated metric definitions, so refuse instead.
         try:
             new_rev = ws.store.check_remote().revision
         except Exception:
-            if ws.manifest is not None:
-                return ws  # serve stale on transient error
+            logger.exception(
+                f"ensure_fresh [{workspace_name}]: revision check failed, "
+                f"refusing to serve a possibly stale manifest"
+            )
             return None
 
         if current is not None and new_rev == ws.known_revision:
