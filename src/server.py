@@ -13,15 +13,11 @@ from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolAnnotations
 
 if TYPE_CHECKING:
-    # Annotation-only. These are imported lazily inside the handlers at
-    # runtime; `from __future__ import annotations` keeps the signatures
-    # from evaluating them, so this block exists purely for type checkers.
+    # Names used only in annotations. The handlers import what they need at
+    # call time; `from __future__ import annotations` means these signatures
+    # are never evaluated, so nothing here is imported at runtime.
     from starlette.requests import Request
-    from starlette.responses import (
-        JSONResponse,
-        Response,
-        Response as _StarletteResponse,
-    )
+    from starlette.responses import Response
 
     from store.store import DorisStore
 
@@ -865,7 +861,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return _SEMANTIC_LOGIN_HTML.replace("{{ERROR}}", err_html).replace("{{SERVER_NAME}}", cfg.mcp.name)
 
     @mcp.custom_route("/mcp/web/login", methods=["GET"])
-    async def semantic_webui_login_page(request: Request) -> _StarletteResponse:
+    async def semantic_webui_login_page(request: Request) -> Response:
         from starlette.responses import HTMLResponse as _HTML
         # If already logged in, redirect to home
         session_id = request.cookies.get("doris_mcp_session")
@@ -875,7 +871,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return _HTML(_render_login())
 
     @mcp.custom_route("/mcp/web/login", methods=["POST"])
-    async def semantic_webui_login_submit(request: Request) -> _StarletteResponse:
+    async def semantic_webui_login_submit(request: Request) -> Response:
         from starlette.responses import HTMLResponse as _HTML, RedirectResponse as _R
         try:
             form = await request.form()
@@ -910,7 +906,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return resp
 
     @mcp.custom_route("/mcp/web/logout", methods=["GET"])
-    async def semantic_webui_logout(request: Request) -> _StarletteResponse:
+    async def semantic_webui_logout(request: Request) -> Response:
         from starlette.responses import RedirectResponse as _R
         session_id = request.cookies.get("doris_mcp_session")
         if session_id:
@@ -1279,7 +1275,7 @@ function wsAction(url,label) {
 
     @mcp.custom_route("/mcp/web/upload", methods=["POST"])
     async def semantic_webui_upload(request: Request) -> Response:
-        from starlette.responses import HTMLResponse as _HTML, RedirectResponse as _Redirect
+        from starlette.responses import RedirectResponse as _Redirect
         client_id, err = await _check_admin_access(request)
         if err:
             return err

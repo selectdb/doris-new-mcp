@@ -1,0 +1,7 @@
+{
+  // Point Pylance at the project venv; without this it cannot resolve
+  // fastmcp, starlette, pymysql, etc.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+  "python.analysis.typeCheckingMode": "basic"
+}
