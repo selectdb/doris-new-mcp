@@ -226,6 +226,22 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
             on_auth_error=lambda: _credential_cache.clear(username, password),
         )
 
+    async def _pool_or_error(tool_name: str) -> tuple[ConnectionPool | None, str | None]:
+        """Resolve the per-user pool, converting failures into a tool error.
+
+        Tool handlers must never let a connection failure escape — an
+        uncaught exception tears down the MCP transport instead of
+        returning a result the caller can act on.
+        """
+        try:
+            return await _get_per_user_pool(), None
+        except Exception as e:
+            logger.warning("%s: cannot acquire Doris connection: %s", tool_name, e)
+            return None, error_response(
+                ErrorCode.CONNECTION_ERROR,
+                f"Cannot connect to Doris with the supplied credentials: {e}",
+            )
+
     def _get_machine_ip() -> str:
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -373,7 +389,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool = await _get_per_user_pool()
+        pool, err = await _pool_or_error("list_databases")
+        if err:
+            return err
         result = await _list_databases(pool, page_size, page_token or None, cc.db_whitelist or None)
         log_tool_call("list_databases", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -393,7 +411,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         start = time.monotonic()
         if cc.db_whitelist and database not in cc.db_whitelist:
             return error_response(ErrorCode.PERMISSION_DENIED, f"Database '{database}' not in whitelist")
-        pool = await _get_per_user_pool()
+        pool, err = await _pool_or_error("list_tables")
+        if err:
+            return err
         result = await _list_tables(pool, database, like or None, page_size, page_token or None)
         log_tool_call("list_tables", client_id=auth.client_id, params={"database": database},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -408,7 +428,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool = await _get_per_user_pool()
+        pool, err = await _pool_or_error("describe_table")
+        if err:
+            return err
         result = await _describe_table(pool, database, table, detail_level)
         log_tool_call("describe_table", client_id=auth.client_id, params={"database": database, "table": table},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -424,7 +446,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
 
-        pool = await _get_per_user_pool()
+        pool, err = await _pool_or_error("execute_query")
+        if err:
+            return err
 
         start = time.monotonic()
         result = await _execute_query(pool, sql, database or None, max_rows or None)
@@ -451,8 +475,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         # Verify Doris DB connectivity (use per-user pool with request credentials)
         db_ok = False
         db_error = ""
-        health_pool = await _get_per_user_pool()
+        health_pool, health_err = await _pool_or_error("check_service_health")
+        if health_err:
+            db_error = "credentials rejected by Doris"
         try:
+            if health_pool is None:
+                raise RuntimeError(db_error)
             await health_pool.execute("SELECT 1")
             db_ok = True
         except Exception as e:
@@ -580,7 +608,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if where:
             where = ws.compiler.resolve_where(metrics, where)
 
-        pool = await _get_per_user_pool()
+        pool, err = await _pool_or_error("query_metric")
+        if err:
+            return err
 
         result = await _query_metric(ws.compiler, pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
         duration = (time.monotonic() - start) * 1000
