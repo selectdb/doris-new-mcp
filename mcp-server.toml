@@ -12,7 +12,7 @@ mcp_name = "doris-new-mcp"        # MCP 服务名称
 mcp_host = "0.0.0.0"              # HTTP 监听地址
 mcp_port = 3000                   # HTTP 监听端口
 fe_port = 9030                    # Doris FE MySQL 端口（同机 127.0.0.1）
-seed_example = true               # Admin 首次登录 WebUI 后自动部署 example；false 时等待按钮手动部署
+seed_example = false              # 默认不部署；Admin 可在 WebUI 手动部署 example
 
 # ---------------------------------------------------------------------------
 # 日志

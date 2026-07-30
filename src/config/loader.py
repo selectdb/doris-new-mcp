@@ -53,7 +53,7 @@ class McpConfig:
         if self.log_rotation_when not in _WHEN:
             raise ValueError(f"Invalid rotation_when: '{self.log_rotation_when}'")
 
-        self.seed_example: bool = srv.get("seed_example", True)
+        self.seed_example: bool = srv.get("seed_example", False)
 
 
 class ClusterConfig:
