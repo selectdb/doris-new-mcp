@@ -86,7 +86,23 @@ def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | 
     return session_id, parsed_ip.compressed
 
 
-def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
+def get_machine_ip() -> str:
+    """Return the IPv4 address selected by the UDP route to a public endpoint."""
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+def create_server(
+    config_dir: str | None = None,
+    env_file: str | None = None,
+    machine_ip: str | None = None,
+) -> FastMCP:
     """Create and configure the MCP server."""
     if config_dir is None:
         config_dir = os.environ.get("DORIS_MCP_CONFIG_DIR", "config")
@@ -320,16 +336,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    def _get_machine_ip() -> str:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        finally:
-            s.close()
-
-    _MACHINE_IP = _get_machine_ip()
+    _MACHINE_IP = machine_ip if machine_ip is not None else get_machine_ip()
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql
