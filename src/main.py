@@ -16,6 +16,7 @@ def main() -> None:
     cfg = AppConfig(args.config_dir, env_file=args.env_file)
     # Resolve once so the server and affinity middleware identify this same node.
     machine_ip = resolve_machine_ip(cfg.mcp.private_ip)
+    force_target = cfg.mcp.private_ip or None
 
     mcp = create_server(
         config_dir=args.config_dir,
@@ -39,6 +40,7 @@ def main() -> None:
                 decoder=_decode_webui_session_cookie,
                 local_ip=machine_ip,
                 target_port=cfg.mcp.port,
+                force_target_ip=force_target,
             ),
             Middleware(CharsetMiddleware),
         ],
