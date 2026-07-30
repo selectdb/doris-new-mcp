@@ -601,7 +601,7 @@ doris-mcp-server/
 │   └── metricflow/              # 内置 MetricFlow 引擎（仅编译模式）
 └── mcp-client/                  # CLI 客户端（独立包）
     └── client/
-        ├── cli.py               # CLI 入口（cyclopts 框架）
+        ├── cli.py               # CLI 入口（typer 框架）
         ├── config.py            # 环境变量/文件配置
         ├── http_client.py       # HTTP API 客户端
         ├── mcp_client.py        # MCP streamable-http 传输层
