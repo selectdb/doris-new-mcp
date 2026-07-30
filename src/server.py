@@ -86,7 +86,47 @@ def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | 
     return session_id, parsed_ip.compressed
 
 
-def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
+def get_machine_ip() -> str:
+    """Return the IPv4 address selected by the UDP route to a public endpoint."""
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+def resolve_machine_ip(configured_private_ip: str | None) -> str:
+    """Resolve this node's RFC-1918 IPv4, preferring an explicit configuration."""
+    if configured_private_ip is None:
+        candidate = ""
+    elif isinstance(configured_private_ip, str):
+        candidate = configured_private_ip.strip()
+    else:
+        raise ValueError("Configured private IP must be a string or null")
+
+    source = "Configured private IP"
+    if not candidate:
+        candidate = get_machine_ip()
+        source = "Automatically detected machine IP"
+
+    try:
+        parsed_ip = ipaddress.ip_address(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}") from exc
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}")
+    return parsed_ip.compressed
+
+
+def create_server(
+    config_dir: str | None = None,
+    env_file: str | None = None,
+    machine_ip: str | None = None,
+    webui_ip: str | None = None,
+) -> FastMCP:
     """Create and configure the MCP server."""
     if config_dir is None:
         config_dir = os.environ.get("DORIS_MCP_CONFIG_DIR", "config")
@@ -320,16 +360,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    def _get_machine_ip() -> str:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        finally:
-            s.close()
-
-    _MACHINE_IP = _get_machine_ip()
+    # Machine IP for local Doris connections — always the real local address.
+    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip("")
+    # Web UI IP written into session cookies.  When ``privateIp`` is configured
+    # this points browsers at the designated node; otherwise it matches the
+    # local machine address (cookie-affinity mode).
+    _WEBUI_IP = webui_ip if webui_ip is not None else _MACHINE_IP
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql
@@ -960,11 +996,11 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
         # Create session (any authenticated Doris user can log in)
         session_id = _secrets.token_urlsafe(32)
-        session_cookie_value = _encode_webui_session_cookie(session_id, _MACHINE_IP)
+        session_cookie_value = _encode_webui_session_cookie(session_id, _WEBUI_IP)
         _webui_sessions[session_id] = {
             "doris_user": user,
             "doris_password": password,
-            "server_ip": _MACHINE_IP,
+            "server_ip": _WEBUI_IP,
             "created_at": time.time(),
             "is_admin": is_admin,
         }
