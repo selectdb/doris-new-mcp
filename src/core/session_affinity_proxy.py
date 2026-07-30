@@ -56,7 +56,7 @@ def _forward_headers(headers: list[tuple[bytes, bytes]], *, add_hop: bool = Fals
     """Drop routing and hop-by-hop fields without flattening duplicate headers."""
     connection_headers = _connection_tokens(headers)
     excluded = _HOP_BY_HOP_HEADERS | connection_headers | {b"host", _INTERNAL_HOP_HEADER}
-    result = [(name, value) for name, value in headers if name.lower() not in excluded]
+    result = [(name.lower(), value) for name, value in headers if name.lower() not in excluded]
     if add_hop:
         result.append((_INTERNAL_HOP_HEADER, b"1"))
     return result
@@ -182,6 +182,7 @@ class SessionAffinityProxy:
                     follow_redirects=False,
                     timeout=self._timeout,
                     cookies=CookieJar(policy=_RejectSetCookiePolicy()),
+                    trust_env=False,
                 )
         return self._client
 
@@ -223,7 +224,7 @@ class SessionAffinityProxy:
             )
             response = await client.send(request, stream=True)
             response_start_attempted = True
-            await send({
+            await self._send_downstream(send, {
                 "type": "http.response.start",
                 "status": response.status_code,
                 "headers": _forward_headers(list(response.headers.raw)),
@@ -275,22 +276,37 @@ class SessionAffinityProxy:
         # races the server's request-body consumer.  Send failures and task
         # cancellation terminate the upstream stream instead.
         if response.is_stream_consumed:
-            await send({"type": "http.response.body", "body": response.content, "more_body": False})
+            await self._send_downstream(send, {"type": "http.response.body", "body": response.content, "more_body": False})
             return
         async for chunk in response.aiter_raw():
-            await send({"type": "http.response.body", "body": chunk, "more_body": True})
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+            await self._send_downstream(send, {"type": "http.response.body", "body": chunk, "more_body": True})
+        await self._send_downstream(send, {"type": "http.response.body", "body": b"", "more_body": False})
+
+    @staticmethod
+    async def _send_downstream(
+        send: Callable[[dict[str, Any]], Awaitable[None]], message: dict[str, Any]
+    ) -> None:
+        """Translate downstream socket disconnects at the ASGI send boundary."""
+        try:
+            await send(message)
+        except OSError as exc:
+            raise _ClientDisconnected from exc
 
     @staticmethod
     async def _send_error(
         send: Callable[[dict[str, Any]], Awaitable[None]], status: int, body: bytes
     ) -> None:
-        await send({
-            "type": "http.response.start",
-            "status": status,
-            "headers": [(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", str(len(body)).encode())],
-        })
-        await send({"type": "http.response.body", "body": body, "more_body": False})
+        try:
+            await SessionAffinityProxy._send_downstream(send, {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", str(len(body)).encode())],
+            })
+            await SessionAffinityProxy._send_downstream(
+                send, {"type": "http.response.body", "body": body, "more_body": False}
+            )
+        except _ClientDisconnected:
+            return
 
 
 # Explicit alias for integrations that name ASGI wrappers as middleware.
