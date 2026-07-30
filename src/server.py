@@ -42,14 +42,31 @@ logger = logging.getLogger("doris_new_mcp")
 
 _WEBUI_SESSION_COOKIE = "doris_mcp_session"
 
+# RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
+_IPV4_RFC1918_NETS = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+
+
+def _is_rfc1918_ipv4(ip: ipaddress.IPv4Address) -> bool:
+    """Return ``True`` if *ip* belongs to one of the three RFC-1918 blocks.
+
+    This deliberately rejects loopback (127.0.0.0/8), link-local
+    (169.254.0.0/16) and every other non-RFC-1918 address that
+    :attr:`ipaddress.IPv4Address.is_private` would accept.
+    """
+    return any(ip in net for net in _IPV4_RFC1918_NETS)
+
 
 def _encode_webui_session_cookie(session_id: str, server_ip: str) -> str:
     """Encode a Web UI session ID with the issuing server's private IPv4."""
     if not session_id or "." in session_id:
         raise ValueError("Session ID must be non-empty and cannot contain '.'")
     parsed_ip = ipaddress.ip_address(server_ip)
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not parsed_ip.is_private:
-        raise ValueError("Web UI session cookie requires a private IPv4 server IP")
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+        raise ValueError("Web UI session cookie requires an RFC-1918 private IPv4 server IP")
     return f"{session_id}.{parsed_ip.compressed}"
 
 
@@ -64,7 +81,7 @@ def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | 
         parsed_ip = ipaddress.ip_address(server_ip)
     except ValueError:
         return None
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not parsed_ip.is_private:
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
         return None
     return session_id, parsed_ip.compressed
 
