@@ -43,6 +43,14 @@ class McpConfig:
         self.host: str = srv.get("mcp_host", "0.0.0.0")
         self.port: int = srv.get("mcp_port", 3000)
 
+        # `privateIp` is the documented key; retain `private_ip` for legacy configs.
+        private_ip = srv.get("privateIp", srv.get("private_ip", ""))
+        if private_ip is None:
+            private_ip = ""
+        if not isinstance(private_ip, str):
+            raise ValueError("server.privateIp must be a string or null")
+        self.private_ip: str = private_ip.strip()
+
         log = data.get("logging", {})
         self.log_level: str = log.get("level", "info")
         self.audit_log_path: str = log.get("audit_log", "./logs/audit.log")
