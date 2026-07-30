@@ -17,7 +17,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_NAME="doris-mcp-server"
-VERSION="${VERSION:-0.3.0}"
+VERSION="${VERSION:-0.2.2}"
 PYTHON_DIR="$SCRIPT_DIR/python"
 REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
 DIST_DIR="$SCRIPT_DIR/dist"
