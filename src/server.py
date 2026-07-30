@@ -62,12 +62,12 @@ def _is_rfc1918_ipv4(ip: ipaddress.IPv4Address) -> bool:
 
 
 def _encode_webui_session_cookie(session_id: str, server_ip: str) -> str:
-    """Encode a Web UI session ID with the issuing server's private IPv4."""
+    """Encode a Web UI session ID with the issuing server's IPv4 address."""
     if not session_id or "." in session_id:
         raise ValueError("Session ID must be non-empty and cannot contain '.'")
     parsed_ip = ipaddress.ip_address(server_ip)
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
-        raise ValueError("Web UI session cookie requires an RFC-1918 private IPv4 server IP")
+    if not isinstance(parsed_ip, ipaddress.IPv4Address):
+        raise ValueError("Web UI session cookie requires an IPv4 server IP")
     return f"{session_id}.{parsed_ip.compressed}"
 
 
@@ -82,25 +82,36 @@ def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | 
         parsed_ip = ipaddress.ip_address(server_ip)
     except ValueError:
         return None
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+    if not isinstance(parsed_ip, ipaddress.IPv4Address):
         return None
     return session_id, parsed_ip.compressed
 
 
-def get_machine_ip() -> str:
-    """Return the IPv4 address selected by the UDP route to a public endpoint."""
+def get_machine_ip() -> str | None:
+    """Best-effort local IPv4 detection via the UDP route to a public endpoint.
+
+    Returns ``None`` instead of raising when the probe fails (offline host,
+    no default route, IPv6-only stack) so startup can degrade gracefully.
+    """
     import socket
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
         return sock.getsockname()[0]
+    except OSError:
+        return None
     finally:
         sock.close()
 
 
 def resolve_machine_ip(configured_private_ip: str | None) -> str:
-    """Resolve this node's RFC-1918 IPv4, preferring an explicit configuration."""
+    """Resolve this node's IPv4 identity for session affinity.
+
+    Preference order: configured ``privateIp`` → UDP auto-detection →
+    ``127.0.0.1`` fallback.  Non-RFC-1918 addresses (e.g. public IPs) are
+    accepted with a warning instead of being rejected.
+    """
     if configured_private_ip is None:
         candidate = ""
     elif isinstance(configured_private_ip, str):
@@ -108,17 +119,44 @@ def resolve_machine_ip(configured_private_ip: str | None) -> str:
     else:
         raise ValueError("Configured private IP must be a string or null")
 
-    source = "Configured private IP"
-    if not candidate:
-        candidate = get_machine_ip()
-        source = "Automatically detected machine IP"
+    if candidate:
+        # A configured value is operator input — fail fast on garbage.
+        source = "Configured private IP"
+        try:
+            parsed_ip = ipaddress.ip_address(candidate)
+        except ValueError as exc:
+            raise ValueError(f"{source} must be an IPv4 address: {candidate!r}") from exc
+        if not isinstance(parsed_ip, ipaddress.IPv4Address):
+            raise ValueError(f"{source} must be an IPv4 address: {candidate!r}")
+    else:
+        # Auto-detection is best-effort: an unusable result must not abort
+        # startup.  127.0.0.1 is harmless for single-node deployments (the
+        # affinity cookie always points back at this node); multi-node
+        # deployments must configure ``privateIp`` so nodes can be told apart.
+        parsed_ip = None
+        detected = get_machine_ip()
+        if detected:
+            try:
+                probed = ipaddress.ip_address(detected)
+                if isinstance(probed, ipaddress.IPv4Address):
+                    parsed_ip = probed
+            except ValueError:
+                pass
+        if parsed_ip is None:
+            logger.warning(
+                "Could not auto-detect the machine IP (offline host, no default "
+                "route, or IPv6-only stack); falling back to 127.0.0.1. This is "
+                "fine for single-node deployments; multi-node deployments must "
+                "set server.privateIp in mcp-server.toml."
+            )
+            return "127.0.0.1"
 
-    try:
-        parsed_ip = ipaddress.ip_address(candidate)
-    except ValueError as exc:
-        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}") from exc
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
-        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}")
+    if not _is_rfc1918_ipv4(parsed_ip):
+        logger.warning(
+            "Node IP %s is not an RFC-1918 private address; using it anyway "
+            "for session-affinity node identity.",
+            parsed_ip.compressed,
+        )
     return parsed_ip.compressed
 
 
@@ -127,13 +165,16 @@ def create_server(
     env_file: str | None = None,
     machine_ip: str | None = None,
     webui_ip: str | None = None,
+    config: "AppConfig | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server."""
     if config_dir is None:
         config_dir = os.environ.get("DORIS_MCP_CONFIG_DIR", "config")
 
     config_path = os.path.abspath(config_dir)
-    cfg = AppConfig(config_path, env_file=env_file)
+    # Reuse a pre-built config when the caller (main.py) already parsed it,
+    # so the TOML/dotenv files are read exactly once per process.
+    cfg = config if config is not None else AppConfig(config_path, env_file=env_file)
     cc = cfg.cluster
 
     # Workspace directory
@@ -456,11 +497,12 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    # Machine IP for local Doris connections — always the real local address.
-    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip("")
-    # Web UI IP written into session cookies.  When ``privateIp`` is configured
-    # this points browsers at the designated node; otherwise it matches the
-    # local machine address (cookie-affinity mode).
+    # Node identity: used for local Doris connections and as the
+    # session-affinity local IP.  Prefers the caller-provided value, then
+    # the configured ``privateIp``, then auto-detection (with fallback).
+    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip(cfg.mcp.private_ip)
+    # Web UI IP written into session cookies; defaults to the node identity
+    # (cookie-affinity mode).
     _WEBUI_IP = webui_ip if webui_ip is not None else _MACHINE_IP
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
