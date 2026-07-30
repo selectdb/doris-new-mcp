@@ -12,14 +12,21 @@ Covers:
   - Multiple surviving files depend on deleted file → all reported
 """
 
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from tools.dependency import (
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from tools.dependency import (  # noqa: E402
     check_delete_dependencies,
     _extract_exports,
     _extract_references,
     _extract_measure_names_from_expr,
+    _extract_ref_name,
 )
 
 
@@ -150,6 +157,40 @@ semantic_model:
       agg: sum
 """
 
+MODEL_REF_YAML = """---
+semantic_model:
+  name: order_facts
+  model: ref('orders')
+  db_table: dw.order_facts
+  defaults:
+    agg_time_dimension: order_date
+  entities:
+    - name: order
+      type: primary
+      expr: order_id
+  measures:
+    - name: fact_count
+      expr: order_id
+      agg: count
+"""
+
+MODEL_REF_PLAIN_YAML = """---
+semantic_model:
+  name: order_facts_plain
+  model: orders
+  db_table: dw.order_facts
+  defaults:
+    agg_time_dimension: order_date
+  entities:
+    - name: order
+      type: primary
+      expr: order_id
+  measures:
+    - name: fact_count
+      expr: order_id
+      agg: count
+"""
+
 
 # ══════════════════════════════════════════════════════════════════
 class TestDeleteDependencies(unittest.TestCase):
@@ -277,6 +318,41 @@ time_config:
         self.assertEqual(errors, [],
                          "Non-model YAML should have no exports")
 
+    def test_model_ref_field_blocks_delete(self):
+        """Deleting orders.yaml when order_facts.yaml references model
+        'orders' via ``model: ref('orders')`` → blocked."""
+        active = {
+            "orders.yaml": ORDERS_YAML,
+            "order_facts.yaml": MODEL_REF_YAML,
+        }
+        errors = check_delete_dependencies("orders.yaml", ORDERS_YAML, active)
+        self.assertEqual(len(errors), 1,
+                         f"Expected 1 error, got {len(errors)}: {errors}")
+        self.assertIn("order_facts.yaml", errors[0])
+        self.assertIn("orders", errors[0])
+
+    def test_model_ref_plain_name_blocks_delete(self):
+        """A plain ``model: orders`` (no ref() wrapper) also blocks deletion."""
+        active = {
+            "orders.yaml": ORDERS_YAML,
+            "order_facts_plain.yaml": MODEL_REF_PLAIN_YAML,
+        }
+        errors = check_delete_dependencies("orders.yaml", ORDERS_YAML, active)
+        self.assertEqual(len(errors), 1,
+                         f"Expected 1 error, got {len(errors)}: {errors}")
+
+    def test_model_provided_by_surviving_file_allowed(self):
+        """If another surviving file also provides model 'orders',
+        deleting orders.yaml is allowed."""
+        active = {
+            "orders.yaml": ORDERS_YAML,
+            "orders_backup.yaml": ORDERS_YAML,
+            "order_facts.yaml": MODEL_REF_YAML,
+        }
+        errors = check_delete_dependencies("orders.yaml", ORDERS_YAML, active)
+        self.assertEqual(errors, [],
+                         f"model provided by orders_backup too, should allow: {errors}")
+
 
 class TestExportExtraction(unittest.TestCase):
     """Unit tests for _extract_exports and _extract_references helpers."""
@@ -306,6 +382,14 @@ class TestExportExtraction(unittest.TestCase):
     def test_extract_references_conversion_metric(self):
         refs = _extract_references(CONVERSION_METRIC_YAML)
         self.assertIn("user", refs["entities"])
+
+    def test_extract_references_model_field(self):
+        refs = _extract_references(MODEL_REF_YAML)
+        self.assertIn("orders", refs["models"])
+
+    def test_extract_references_model_field_plain_name(self):
+        refs = _extract_references(MODEL_REF_PLAIN_YAML)
+        self.assertIn("orders", refs["models"])
 
     def test_extract_exports_with_broken_yaml(self):
         exports = _extract_exports("this is not: valid: yaml: [")
@@ -340,6 +424,22 @@ class TestExpressionParsing(unittest.TestCase):
     def test_empty_expression(self):
         names = _extract_measure_names_from_expr("")
         self.assertEqual(names, [])
+
+
+class TestRefNameParsing(unittest.TestCase):
+    """Unit tests for _extract_ref_name."""
+
+    def test_ref_call_single_quotes(self):
+        self.assertEqual(_extract_ref_name("ref('orders')"), "orders")
+
+    def test_ref_call_double_quotes(self):
+        self.assertEqual(_extract_ref_name('ref("orders")'), "orders")
+
+    def test_ref_call_with_whitespace(self):
+        self.assertEqual(_extract_ref_name("ref( 'orders' )"), "orders")
+
+    def test_plain_name(self):
+        self.assertEqual(_extract_ref_name("orders"), "orders")
 
 
 if __name__ == "__main__":
