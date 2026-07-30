@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any, TypeAlias
 
 import httpx
@@ -30,6 +31,16 @@ _HOP_BY_HOP_HEADERS = {
 
 class _ClientDisconnected(Exception):
     """The downstream ASGI server reported that its client went away."""
+
+
+class _RejectSetCookiePolicy(DefaultCookiePolicy):
+    """Keep a shared proxy client from learning state from any upstream."""
+
+    def set_ok(self, cookie: Any, request: Any) -> bool:
+        return False
+
+
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=3.0, read=60.0, write=60.0, pool=5.0)
 
 
 def _connection_tokens(headers: list[tuple[bytes, bytes]]) -> set[bytes]:
@@ -64,16 +75,19 @@ def _without_internal_header(scope: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cookie_value(headers: list[tuple[bytes, bytes]], cookie_name: str) -> str | None:
-    """Read one named cookie without depending on a framework request object."""
+    """Read one named cookie, rejecting requests which provide it more than once."""
     wanted = cookie_name.encode("ascii")
+    value: str | None = None
     for header_name, header_value in headers:
         if header_name.lower() != b"cookie":
             continue
         for item in header_value.split(b";"):
-            name, separator, value = item.strip().partition(b"=")
+            name, separator, candidate = item.strip().partition(b"=")
             if separator and name == wanted:
-                return value.decode("latin-1")
-    return None
+                if value is not None:
+                    return None
+                value = candidate.decode("latin-1")
+    return value
 
 
 class SessionAffinityProxy:
@@ -100,9 +114,10 @@ class SessionAffinityProxy:
         self.local_ip = local_ip
         self.target_port = target_port
         self.cookie_name = cookie_name
+        # An injected client is owned by its caller, including its cookie state.
         self._client = client
         self._owns_client = client is None
-        self._timeout = timeout
+        self._timeout = _DEFAULT_TIMEOUT if timeout is None else timeout
         self._client_lock = asyncio.Lock()
 
     async def __call__(
@@ -156,7 +171,7 @@ class SessionAffinityProxy:
         try:
             await self.app(scope, receive, send)
         finally:
-            await self._close_client()
+            await self.aclose()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None:
@@ -166,13 +181,18 @@ class SessionAffinityProxy:
                 self._client = httpx.AsyncClient(
                     follow_redirects=False,
                     timeout=self._timeout,
+                    cookies=CookieJar(policy=_RejectSetCookiePolicy()),
                 )
         return self._client
 
-    async def _close_client(self) -> None:
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
-            self._client = None
+    async def aclose(self) -> None:
+        """Close the internally-created shared client, if this proxy owns it."""
+        if not self._owns_client:
+            return
+        async with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
 
     async def _proxy(
         self,
@@ -182,6 +202,8 @@ class SessionAffinityProxy:
         target_ip: str,
     ) -> None:
         response: httpx.Response | None = None
+        response_started = False
+        response_start_attempted = False
         try:
             raw_path = scope.get("raw_path") or scope["path"].encode("utf-8")
             raw_query = scope.get("query_string", b"")
@@ -192,29 +214,42 @@ class SessionAffinityProxy:
             if raw_query:
                 suffix += "?" + raw_query.decode("ascii")
             url = httpx.URL(f"http://{target_ip}:{self.target_port}{suffix}")
-            request = (await self._get_client()).build_request(
+            client = await self._get_client()
+            request = client.build_request(
                 scope["method"],
                 url,
                 headers=_forward_headers(scope.get("headers", []), add_hop=True),
                 content=self._request_body(receive),
             )
-            response = await (await self._get_client()).send(request, stream=True)
-            await self._stream_response(response, receive, send)
+            response = await client.send(request, stream=True)
+            response_start_attempted = True
+            await send({
+                "type": "http.response.start",
+                "status": response.status_code,
+                "headers": _forward_headers(list(response.headers.raw)),
+            })
+            response_started = True
+            await self._stream_response(response, send)
         except _ClientDisconnected:
             return
         except asyncio.CancelledError:
             raise
         except httpx.TimeoutException:
             logger.warning("Session-affinity upstream timed out")
-            if response is None:  # A response object means its headers were sent.
+            if not response_started and not response_start_attempted:
                 await self._send_error(send, 504, b"Gateway Timeout")
-        except httpx.NetworkError:
-            logger.warning("Session-affinity upstream network error")
-            if response is None:  # Do not append an error after response headers.
+        except (httpx.HTTPError, UnicodeError, ValueError):
+            logger.warning("Session-affinity upstream request failed")
+            if not response_started and not response_start_attempted:
                 await self._send_error(send, 502, b"Bad Gateway")
         finally:
             if response is not None:
-                await response.aclose()
+                try:
+                    await response.aclose()
+                except asyncio.CancelledError:
+                    raise
+                except httpx.HTTPError:
+                    logger.warning("Session-affinity upstream response close failed")
 
     async def _request_body(
         self, receive: Callable[[], Awaitable[dict[str, Any]]]
@@ -234,49 +269,17 @@ class SessionAffinityProxy:
     async def _stream_response(
         self,
         response: httpx.Response,
-        receive: Callable[[], Awaitable[dict[str, Any]]],
         send: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> None:
-        await send({
-            "type": "http.response.start",
-            "status": response.status_code,
-            "headers": _forward_headers(list(response.headers.raw)),
-        })
-        # Some test transports intentionally provide an already-buffered
-        # response.  Real ``send(..., stream=True)`` responses take the branch
-        # below and remain fully streaming.
+        # During the response phase do not read ASGI receive: a second reader
+        # races the server's request-body consumer.  Send failures and task
+        # cancellation terminate the upstream stream instead.
         if response.is_stream_consumed:
             await send({"type": "http.response.body", "body": response.content, "more_body": False})
             return
-
-        iterator = response.aiter_raw()
-        disconnect_waiter = asyncio.create_task(self._wait_for_disconnect(receive))
-        try:
-            while True:
-                chunk_task = asyncio.create_task(anext(iterator))
-                done, _ = await asyncio.wait(
-                    {chunk_task, disconnect_waiter}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if disconnect_waiter in done:
-                    chunk_task.cancel()
-                    await asyncio.gather(chunk_task, return_exceptions=True)
-                    raise _ClientDisconnected
-                try:
-                    chunk = chunk_task.result()
-                except StopAsyncIteration:
-                    break
-                await send({"type": "http.response.body", "body": chunk, "more_body": True})
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
-        finally:
-            disconnect_waiter.cancel()
-            await asyncio.gather(disconnect_waiter, return_exceptions=True)
-
-    @staticmethod
-    async def _wait_for_disconnect(
-        receive: Callable[[], Awaitable[dict[str, Any]]]
-    ) -> None:
-        while (message := await receive())["type"] != "http.disconnect":
-            pass
+        async for chunk in response.aiter_raw():
+            await send({"type": "http.response.body", "body": chunk, "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
 
     @staticmethod
     async def _send_error(
