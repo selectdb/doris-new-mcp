@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("doris_new_mcp.semantic")
 
 _SENTINEL_NO_JSON = object()
+
+# Matches single- or double-quoted SQL string literals, including doubled
+# quotes ('' / "") and backslash escapes (\'). Used to mask literals before
+# bare-name substitution in resolve_where.
+_STRING_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.|\"\")*\"")
+_MASKED_LITERAL_RE = re.compile("\x00(\\d+)\x00")
 
 # Try to import MetricFlow engine
 _ENGINE_AVAILABLE = False
@@ -298,12 +305,23 @@ class MetricFlowCompiler:
             # Apply replacements — match both bare name and backtick-quoted name
             # Sort by length descending to avoid partial replacement
             import re
-            result = where
+            # Mask string literals first so a literal equal to a column name
+            # (e.g. channel = 'channel') is not rewritten. Handles ''/"" doubled
+            # quotes and backslash escapes.
+            literals: list[str] = []
+
+            def _stash(match: "re.Match[str]") -> str:
+                literals.append(match.group(0))
+                return f"\x00{len(literals) - 1}\x00"
+
+            result = _STRING_LITERAL_RE.sub(_stash, where)
             for bare_name, template in sorted(col_templates.items(), key=lambda x: -len(x[0])):
                 # Match: word boundary + name + word boundary, or `name`
                 pattern = re.compile(r'(?<!\w)(?:`?' + re.escape(bare_name) + r'`?)(?!\w)', re.IGNORECASE)
                 result = pattern.sub(template, result)
 
+            # Restore masked literals
+            result = _MASKED_LITERAL_RE.sub(lambda m: literals[int(m.group(1))], result)
             return result
         except Exception as e:
             logger.warning(f"Failed to parse WHERE expression: {e}, passing through as-is")
