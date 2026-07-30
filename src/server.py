@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import time
@@ -39,6 +40,33 @@ from tools.query import execute_query as _execute_query
 
 logger = logging.getLogger("doris_new_mcp")
 
+_WEBUI_SESSION_COOKIE = "doris_mcp_session"
+
+
+def _encode_webui_session_cookie(session_id: str, server_ip: str) -> str:
+    """Encode a Web UI session ID with the issuing server's private IPv4."""
+    if not session_id or "." in session_id:
+        raise ValueError("Session ID must be non-empty and cannot contain '.'")
+    parsed_ip = ipaddress.ip_address(server_ip)
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not parsed_ip.is_private:
+        raise ValueError("Web UI session cookie requires a private IPv4 server IP")
+    return f"{session_id}.{parsed_ip.compressed}"
+
+
+def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | None:
+    """Return ``(session_id, server_ip)`` from a Web UI session cookie."""
+    if not cookie_value:
+        return None
+    session_id, separator, server_ip = cookie_value.partition(".")
+    if not separator or not session_id or not server_ip:
+        return None
+    try:
+        parsed_ip = ipaddress.ip_address(server_ip)
+    except ValueError:
+        return None
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not parsed_ip.is_private:
+        return None
+    return session_id, parsed_ip.compressed
 
 
 def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
