@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import time
@@ -39,6 +40,50 @@ from tools.query import execute_query as _execute_query
 
 logger = logging.getLogger("doris_new_mcp")
 
+_WEBUI_SESSION_COOKIE = "doris_mcp_session"
+
+# RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
+_IPV4_RFC1918_NETS = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+
+
+def _is_rfc1918_ipv4(ip: ipaddress.IPv4Address) -> bool:
+    """Return ``True`` if *ip* belongs to one of the three RFC-1918 blocks.
+
+    This deliberately rejects loopback (127.0.0.0/8), link-local
+    (169.254.0.0/16) and every other non-RFC-1918 address that
+    :attr:`ipaddress.IPv4Address.is_private` would accept.
+    """
+    return any(ip in net for net in _IPV4_RFC1918_NETS)
+
+
+def _encode_webui_session_cookie(session_id: str, server_ip: str) -> str:
+    """Encode a Web UI session ID with the issuing server's private IPv4."""
+    if not session_id or "." in session_id:
+        raise ValueError("Session ID must be non-empty and cannot contain '.'")
+    parsed_ip = ipaddress.ip_address(server_ip)
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+        raise ValueError("Web UI session cookie requires an RFC-1918 private IPv4 server IP")
+    return f"{session_id}.{parsed_ip.compressed}"
+
+
+def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | None:
+    """Return ``(session_id, server_ip)`` from a Web UI session cookie."""
+    if not cookie_value:
+        return None
+    session_id, separator, server_ip = cookie_value.partition(".")
+    if not separator or not session_id or not server_ip:
+        return None
+    try:
+        parsed_ip = ipaddress.ip_address(server_ip)
+    except ValueError:
+        return None
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+        return None
+    return session_id, parsed_ip.compressed
 
 
 def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
@@ -346,9 +391,15 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         JSONResponse = _JSONResponse  # alias
 
         # 1. Session cookie
-        session_id = request.cookies.get("doris_mcp_session")
-        if session_id and session_id in _webui_sessions:
-            session = _webui_sessions[session_id]
+        session_cookie = _decode_webui_session_cookie(
+            request.cookies.get(_WEBUI_SESSION_COOKIE)
+        )
+        if session_cookie:
+            session_id, server_ip = session_cookie
+            session = _webui_sessions.get(session_id)
+        else:
+            session_id, server_ip, session = None, None, None
+        if session and session["server_ip"] == server_ip:
             if time.time() - session["created_at"] < _SESSION_TTL:
                 client_id = session["doris_user"]
                 is_admin = (client_id == "admin")
@@ -1025,10 +1076,19 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     async def semantic_webui_login_page(request: Request) -> Response:
         from starlette.responses import HTMLResponse as _HTML
         # If already logged in, redirect to home
-        session_id = request.cookies.get("doris_mcp_session")
-        if session_id and session_id in _webui_sessions:
-            from starlette.responses import RedirectResponse as _R
-            return _R("/mcp/web", status_code=303)
+        session_cookie = _decode_webui_session_cookie(
+            request.cookies.get(_WEBUI_SESSION_COOKIE)
+        )
+        if session_cookie:
+            session_id, server_ip = session_cookie
+            session = _webui_sessions.get(session_id)
+            if (
+                session
+                and session["server_ip"] == server_ip
+                and time.time() - session["created_at"] < _SESSION_TTL
+            ):
+                from starlette.responses import RedirectResponse as _R
+                return _R("/mcp/web", status_code=303)
         return _HTML(_render_login())
 
     @mcp.custom_route("/mcp/web/login", methods=["POST"])
@@ -1050,9 +1110,11 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
         # Create session (any authenticated Doris user can log in)
         session_id = _secrets.token_urlsafe(32)
+        session_cookie_value = _encode_webui_session_cookie(session_id, _MACHINE_IP)
         _webui_sessions[session_id] = {
             "doris_user": user,
             "doris_password": password,
+            "server_ip": _MACHINE_IP,
             "created_at": time.time(),
             "is_admin": is_admin,
         }
@@ -1071,7 +1133,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
         resp = _R("/mcp/web", status_code=303)
         resp.set_cookie(
-            "doris_mcp_session", session_id,
+            _WEBUI_SESSION_COOKIE, session_cookie_value,
             httponly=True, samesite="lax", max_age=_SESSION_TTL,
             path="/mcp/web",
         )
@@ -1080,11 +1142,16 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     @mcp.custom_route("/mcp/web/logout", methods=["GET"])
     async def semantic_webui_logout(request: Request) -> Response:
         from starlette.responses import RedirectResponse as _R
-        session_id = request.cookies.get("doris_mcp_session")
-        if session_id:
-            _webui_sessions.pop(session_id, None)
+        session_cookie = _decode_webui_session_cookie(
+            request.cookies.get(_WEBUI_SESSION_COOKIE)
+        )
+        if session_cookie:
+            session_id, server_ip = session_cookie
+            session = _webui_sessions.get(session_id)
+            if session and session["server_ip"] == server_ip:
+                _webui_sessions.pop(session_id, None)
         resp = _R("/mcp/web/login", status_code=303)
-        resp.delete_cookie("doris_mcp_session", path="/mcp/web")
+        resp.delete_cookie(_WEBUI_SESSION_COOKIE, path="/mcp/web")
         return resp
 
     # -- Semantic model pages --
