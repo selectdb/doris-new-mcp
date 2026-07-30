@@ -7,9 +7,22 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolAnnotations
+# ToolAnnotations is defined in mcp.types. `fastmcp.tools.tool` resolves at
+# runtime only through a compatibility shim — that module has no file on disk
+# in fastmcp 3.4, so importing from it breaks whenever the shim is dropped.
+from mcp.types import ToolAnnotations
+
+if TYPE_CHECKING:
+    # Names used only in annotations. The handlers import what they need at
+    # call time; `from __future__ import annotations` means these signatures
+    # are never evaluated, so nothing here is imported at runtime.
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    from store.store import DorisStore
 
 from auth import check_tool_access, init_guard
 from config.loader import AppConfig
@@ -25,6 +38,7 @@ from tools.discovery import (
 from tools.query import execute_query as _execute_query
 
 logger = logging.getLogger("doris_new_mcp")
+
 
 
 def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
@@ -45,17 +59,62 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     _ws_root = _Path(workspace_dir) / "workspaces"
     _ws_root.mkdir(parents=True, exist_ok=True)
 
-    # Seed example workspace on first boot (configurable)
-    if cfg.mcp.seed_example:
-        from store.seed import seed_all, set_doris_port as seed_set_port
-        seed_set_port(cc.fe_mysql_port)
-        _seeded = seed_all()
-        if _seeded:
-            logger.info("Example workspace seeded (data + models)")
-    else:
-        logger.info("Example workspace seeding disabled (seed_example=false)")
+    # ── Lazy seed: deferred to first authenticated request ──
+    _seeded = False
+    _seed_lock = asyncio.Lock()
 
-    # Multi-workspace watcher
+    async def _ensure_seeded(user: str, password: str) -> None:
+        """Seed example workspace + init watcher on first authenticated request.
+
+        Idempotent — runs at most once across all requests.  Uses the
+        caller's credentials so the store layer can connect to Doris.
+        """
+        nonlocal _seeded
+        if _seeded:
+            return
+        async with _seed_lock:
+            if _seeded:
+                return
+            from store.store import set_request_credentials as _set_creds
+            _set_creds(user, password)
+            try:
+                # 1. Seed example data/models if configured
+                if cfg.mcp.seed_example:
+                    from store.seed import seed_all, set_doris_port as seed_set_port
+                    seed_set_port(cc.fe_mysql_port)
+                    performed = seed_all()
+                    if performed:
+                        logger.info("Example workspace seeded (lazy, on first request)")
+                    else:
+                        logger.info("Example workspace already seeded, nothing to do")
+                    # One-time: grant read-only access to all users (idempotent)
+                    try:
+                        import pymysql as _pymysql
+                        _conn = _pymysql.connect(
+                            host="127.0.0.1", port=cc.fe_mysql_port,
+                            user=user, password=password,
+                            charset="utf8mb4", connect_timeout=5,
+                        )
+                        _conn.cursor().execute("GRANT SELECT_PRIV ON *.* TO '%'")
+                        _conn.close()
+                        logger.info("GRANT SELECT_PRIV ON *.* TO '%' — done")
+                    except Exception as _e:
+                        logger.error(
+                            "GRANT SELECT_PRIV ON *.* TO '%%' failed — non-admin "
+                            "users will get permission errors on query: %s", _e,
+                        )
+                # 2. Discover and init all workspaces
+                multi_watcher.initialize()
+                logger.info(f"Watcher initialized: {multi_watcher.workspace_names()}")
+            except Exception:
+                # Leave _seeded unset so the next request retries.  Marking it
+                # done here would strand the server with an empty workspace
+                # until restart.
+                logger.exception("Lazy init failed — will retry on next request")
+                return
+            _seeded = True
+
+    # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
     from store.store import set_doris_port
     set_doris_port(cc.fe_mysql_port)
@@ -64,8 +123,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         workspace_root=_ws_root,
         app_config=cfg,
     )
-    multi_watcher.start()
-    logger.info(f"Multi-workspace watcher ready: {multi_watcher.workspace_names()}")
+    logger.info("Multi-workspace watcher created (lazy init)")
 
     # Setup logging: write to workspace/logs/server.log + stderr
     import logging as _logging
@@ -103,23 +161,11 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     os.makedirs(os.path.dirname(audit_path), exist_ok=True)
     init_audit_log(audit_path, when=cfg.mcp.log_rotation_when, backup_count=cfg.mcp.log_rotation_backup_count)
 
-    # Admin pool: for semantic files, workspace management, periodic checks.
-    # min=1 (always keep one alive), max=10, idle=300s.
-    admin_pool = ConnectionPool(
-        cc,
-        user="admin",
-        password="",
-        min_size=0,
-        max_size=10,
-    )
-
-    # Per-user pool manager (for credential-authenticated SQL queries)
+    # Per-user pool manager — all Doris connections use request credentials.
     pool_manager: PoolManager | None = PoolManager(cc)
 
     init_guard(
         pool_manager=pool_manager,
-        service_pool=admin_pool,
-        oauth_provider=None,
         transport="streamable-http",
     )
 
@@ -151,8 +197,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         ok, _ = await asyncio.to_thread(_verify_doris_credentials, user, password)
         return ok
 
-    auth_provider = CredentialVerifier(_credential_cache, _async_verify_credentials)
-    logger.info("Auth: CredentialVerifier registered (username:password, 10-min cache)")
+    auth_provider = CredentialVerifier(_credential_cache, _async_verify_credentials,
+                                        on_authenticated=_ensure_seeded)
+    logger.info("Auth: CredentialVerifier registered (username:password, 10-min cache, lazy seed)")
 
     # Helper: get store for a workspace (defaults to "example")
     def _get_workspace_from_request(request: Request) -> str:
@@ -164,40 +211,69 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         from store.store import DorisStore as _DS
         return _DS(workspace=workspace)
 
+    from starlette.datastructures import UploadFile as _UploadFile
+
+    def _form_str(form, key: str, default: str = "") -> str:
+        """Read a form field as text.
+
+        ``form.get()`` yields ``UploadFile | str | None`` — a client may post
+        a file part where a text field is expected. Treat any non-text value
+        as absent rather than letting an UploadFile flow into string code.
+        """
+        value = form.get(key)
+        return value if isinstance(value, str) else default
+
     # ── Auth infrastructure ──
 
     import re as _re
     import secrets as _secrets
-    import time as _time_module
     _VALID_WORKSPACE_NAME = _re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*$')
     _webui_sessions: dict[str, dict] = {}
     _SESSION_TTL = 24 * 3600  # 24 hours
 
-    async def _get_per_user_pool(fallback_pool: ConnectionPool) -> ConnectionPool:
-        """Extract per-user pool from Bearer token if available.
+    async def _get_per_user_pool() -> ConnectionPool:
+        """Return a per-user connection pool from the request Bearer token.
 
-        Returns the per-user pool connected via non-127.0.0.1 machine IP.
-        If the pool's first connection fails with an auth error, clears the
-        credential cache so the next request re-verifies against Doris.
-        Falls back to admin pool on any failure.
+        Credentials are extracted from the FastMCP auth context (set by
+        CredentialVerifier).  Raises RuntimeError if no valid token is
+        present — there is no fallback to a shared admin pool.
         """
         if pool_manager is None:
-            return fallback_pool
+            raise RuntimeError("PoolManager not initialized")
+        from mcp.server.auth.middleware.auth_context import get_access_token
+        access_token = get_access_token()
+        if not access_token or not access_token.client_id:
+            raise RuntimeError(
+                "No credentials in request context — "
+                "ensure the request carries a valid Bearer token."
+            )
+        token_str = access_token.token
+        parts = token_str.split(":", 1)
+        username = access_token.client_id
+        password = parts[1] if len(parts) > 1 else ""
+        return await pool_manager.get_or_create_local_pool(
+            username, password, host=_MACHINE_IP,
+            on_auth_error=lambda: _credential_cache.clear(username, password),
+        )
+
+    async def _acquire_pool(tool_name: str) -> ConnectionPool | str:
+        """Resolve the per-user pool, or return an error response to send back.
+
+        Tool handlers must never let a connection failure escape — an
+        uncaught exception tears down the MCP transport instead of
+        returning a result the caller can act on.
+
+        Returns the pool on success, or the JSON error string on failure.
+        Callers narrow with ``isinstance(pool, str)``.
+        """
         try:
-            from mcp.server.auth.middleware.auth_context import get_access_token
-            access_token = get_access_token()
-            if access_token and access_token.client_id:
-                token_str = access_token.token
-                parts = token_str.split(":", 1)
-                username = access_token.client_id
-                password = parts[1] if len(parts) > 1 else ""
-                return await pool_manager.get_or_create_local_pool(
-                    username, password, host=_MACHINE_IP,
-                    on_auth_error=lambda: _credential_cache.clear(username, password),
-                )
+            return await _get_per_user_pool()
         except Exception as e:
-            logger.debug("Failed to get per-user pool, falling back to admin: %s", e)
-        return fallback_pool
+            logger.warning("%s: cannot acquire Doris connection: %s", tool_name, e)
+            return error_response(
+                ErrorCode.CONNECTION_ERROR,
+                f"Cannot connect to Doris with the supplied credentials: {e}",
+            )
 
     def _get_machine_ip() -> str:
         import socket
@@ -243,6 +319,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
                         status_code=403)
+                from store.store import set_request_credentials
+                set_request_credentials(client_id, session.get("doris_password", ""))
+                await _ensure_seeded(client_id, session.get("doris_password", ""))
                 return client_id, is_admin, None
             del _webui_sessions[session_id]
 
@@ -259,6 +338,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
                         status_code=403)
+                from store.store import set_request_credentials
+                set_request_credentials(username, password)
+                await _ensure_seeded(username, password)
                 return username, is_admin, None
             return None, False, JSONResponse(
                 {"success": False, "error": {"code": "UNAUTHORIZED", "message": "Invalid credentials"}},
@@ -299,11 +381,6 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                     await pool_manager.close_all()
                 except Exception:
                     logger.exception("Failed during pool_manager.close_all()")
-            if admin_pool is not None:
-                try:
-                    await admin_pool.close()
-                except Exception:
-                    logger.exception("Failed during admin_pool.close()")
             logger.info("All Doris connection pools closed")
 
     mcp = FastMCP(
@@ -345,7 +422,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _acquire_pool("list_databases")
+        if isinstance(pool, str):
+            return pool
         result = await _list_databases(pool, page_size, page_token or None, cc.db_whitelist or None)
         log_tool_call("list_databases", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -365,7 +444,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         start = time.monotonic()
         if cc.db_whitelist and database not in cc.db_whitelist:
             return error_response(ErrorCode.PERMISSION_DENIED, f"Database '{database}' not in whitelist")
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _acquire_pool("list_tables")
+        if isinstance(pool, str):
+            return pool
         result = await _list_tables(pool, database, like or None, page_size, page_token or None)
         log_tool_call("list_tables", client_id=auth.client_id, params={"database": database},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -380,7 +461,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _acquire_pool("describe_table")
+        if isinstance(pool, str):
+            return pool
         result = await _describe_table(pool, database, table, detail_level)
         log_tool_call("describe_table", client_id=auth.client_id, params={"database": database, "table": table},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
@@ -396,7 +479,9 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
 
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _acquire_pool("execute_query")
+        if isinstance(pool, str):
+            return pool
 
         start = time.monotonic()
         result = await _execute_query(pool, sql, database or None, max_rows or None)
@@ -413,18 +498,21 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
-    async def check_service_health(detail: bool = False) -> str:
+    async def check_service_health() -> str:
         """FIRST TOOL to call at the start of any session. Returns doris connectivity and all workspace statuses. Use to determine which workspaces are available."""
         auth = check_tool_access("check_service_health")
         if auth.denied:
             return auth.denied
         start = time.monotonic()
 
-        # Verify Doris DB connectivity
+        # Verify Doris DB connectivity (use per-user pool with request credentials)
         db_ok = False
         db_error = ""
+        health_pool = await _acquire_pool("check_service_health")
         try:
-            await admin_pool.execute("SELECT 1")
+            if isinstance(health_pool, str):
+                raise RuntimeError("credentials rejected by Doris")
+            await health_pool.execute("SELECT 1")
             db_ok = True
         except Exception as e:
             db_error = str(e)
@@ -434,6 +522,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                 f"Doris FE {cc.fe_host}:{cc.fe_mysql_port}", user="admin")
         else:
             service_health.get("doris_connection").set_error(f"Connection failed: {db_error}")
+
+        # Ensure all known workspaces are loaded (on-demand)
+        for ws_name in multi_watcher.workspace_names():
+            await asyncio.to_thread(multi_watcher.ensure_fresh, ws_name)
 
         # Per-workspace status
         ws_statuses: dict[str, dict] = {}
@@ -493,9 +585,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        if not multi_watcher.get_manifest(workspace) or not multi_watcher.get_compiler(workspace):
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
+        if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
-        result = await _list_metrics(multi_watcher.get_manifest(workspace), page_size, page_token or None)
+        result = await _list_metrics(ws.manifest, page_size, page_token or None)
         log_tool_call("list_metrics", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=True)
         return result
@@ -509,9 +602,10 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        if not multi_watcher.get_manifest(workspace) or not multi_watcher.get_compiler(workspace):
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
+        if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
-        result = await _list_dims(multi_watcher.get_manifest(workspace), metric_name)
+        result = await _list_dims(ws.manifest, metric_name)
         log_tool_call("list_dimensions_for_metric", client_id=auth.client_id, params={"metric_name": metric_name},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=True)
         return result
@@ -535,18 +629,21 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         if auth.denied:
             return auth.denied
         start = time.monotonic()
-        if not multi_watcher.get_manifest(workspace) or not multi_watcher.get_compiler(workspace):
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
+        if not ws or not ws.manifest or not ws.compiler:
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         if group_by:
-            group_by = multi_watcher.get_compiler(workspace).resolve_group_by(metrics, group_by)
+            group_by = ws.compiler.resolve_group_by(metrics, group_by)
         if order_by:
-            order_by = multi_watcher.get_compiler(workspace).resolve_group_by(metrics, order_by)
+            order_by = ws.compiler.resolve_group_by(metrics, order_by)
         if where:
-            where = multi_watcher.get_compiler(workspace).resolve_where(metrics, where)
+            where = ws.compiler.resolve_where(metrics, where)
 
-        pool = await _get_per_user_pool(auth.pool)
+        pool = await _acquire_pool("query_metric")
+        if isinstance(pool, str):
+            return pool
 
-        result = await _query_metric(multi_watcher.get_compiler(workspace), pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
+        result = await _query_metric(ws.compiler, pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
         duration = (time.monotonic() - start) * 1000
         success = '"success": true' in result
         mf_cmd = f"mf query --metrics {','.join(metrics)}"
@@ -561,18 +658,23 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def reload_semantic_layer(workspace: str) -> str:
-        """Trigger async metric layer reload for a workspace. Returns immediately. Check result via check_service_health. workspace is required."""
+        """Reloads the metric layer for a workspace and waits for the result. workspace is required."""
         auth = check_tool_access("reload_semantic_layer")
         if auth.denied:
             return auth.denied
-        status, msg = multi_watcher.force_reload(workspace)
+        ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
+        if not ws:
+            return error_response(ErrorCode.VALIDATION_ERROR, f"Workspace not found: {workspace}")
+        status, msg = await asyncio.to_thread(multi_watcher.force_reload, workspace)
         log_tool_call("reload_semantic_layer", client_id=auth.client_id,
-                      success=(status == "accepted"), duration_ms=0, metricflow=True)
+                      success=(status == "done"), duration_ms=0, metricflow=True)
+        if status == "failed":
+            return error_response(ErrorCode.INTERNAL_ERROR, msg)
         return success_response({"status": status, "message": msg})
 
 
     @mcp.custom_route("/mcp/web/semantic/reload", methods=["POST"])
-    async def api_reload_semantic_layer(request: Request) -> JSONResponse:
+    async def api_reload_semantic_layer(request: Request) -> Response:
         """HTTP endpoint for CI/CD and schedulers. Admin only."""
         client_id, err = await _check_admin_access(request)
         if err:
@@ -584,15 +686,15 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         ws = body.get("workspace", "example")
         if not multi_watcher.has_workspace(ws):
             return _JSONResponse({"success": False, "error": {"code": "VALIDATION_ERROR", "message": f"Workspace not found: {ws}"}}, status_code=400)
-        status, msg = multi_watcher.force_reload(ws)
+        status, msg = await asyncio.to_thread(multi_watcher.force_reload, ws)
         log_tool_call("reload_semantic_layer", client_id=client_id,
-                      success=(status == "accepted"), duration_ms=0, metricflow=True)
-        if status == "rejected":
+                      success=(status == "done"), duration_ms=0, metricflow=True)
+        if status in ("rejected", "failed"):
             return _JSONResponse({"success": False, "error": {"code": "RELOAD_FAILED", "message": msg}}, status_code=500)
         return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
 
     @mcp.custom_route("/mcp/web/workspace/create", methods=["POST"])
-    async def api_workspace_create(request: Request) -> JSONResponse:
+    async def api_workspace_create(request: Request) -> Response:
         """Create a new workspace by creating storage tables."""
         client_id, err = await _check_admin_access(request)
         if err:
@@ -612,7 +714,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return _JSONResponse({"success": True, "data": {"workspace": name, "message": f"Workspace '{name}' created."}})
 
     @mcp.custom_route("/mcp/web/workspace/delete", methods=["POST"])
-    async def api_workspace_delete(request: Request) -> JSONResponse:
+    async def api_workspace_delete(request: Request) -> Response:
         """Delete a workspace by dropping its storage tables."""
         client_id, err = await _check_admin_access(request)
         if err:
@@ -641,7 +743,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
 
     @mcp.custom_route("/mcp/web/semantic/push", methods=["POST"])
-    async def api_semantic_push(request: Request) -> JSONResponse:
+    async def api_semantic_push(request: Request) -> Response:
         """CLI push: upload YAML files directly to staging_store for a workspace."""
         import yaml as _yaml
         client_id, err = await _check_admin_access(request)
@@ -656,12 +758,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                 status_code=400,
             )
         
-        ws = form.get("workspace", "example")
+        ws = _form_str(form, "workspace", "example")
         st = _get_store(ws)
 
         files_staged = 0
         for _, upload in form.multi_items():
-            if not hasattr(upload, 'filename') or not upload.filename:
+            if not isinstance(upload, _UploadFile) or not upload.filename:
                 continue
             filename = upload.filename
             if ".." in filename or "/" in filename or "\\" in filename:
@@ -700,7 +802,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         )
 
     @mcp.custom_route("/mcp/web/semantic/push/{request_id}", methods=["GET"])
-    async def api_semantic_push_result(request: Request) -> JSONResponse:
+    async def api_semantic_push_result(request: Request) -> Response:
         return _JSONResponse({"success": True, "data": {"message": "Push go to staging. Use validate + commit."}})
 
     @mcp.custom_route("/mcp/web/semantic/pull", methods=["GET"])
@@ -770,7 +872,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return _SEMANTIC_LOGIN_HTML.replace("{{ERROR}}", err_html).replace("{{SERVER_NAME}}", cfg.mcp.name)
 
     @mcp.custom_route("/mcp/web/login", methods=["GET"])
-    async def semantic_webui_login_page(request: Request) -> _StarletteResponse:
+    async def semantic_webui_login_page(request: Request) -> Response:
         from starlette.responses import HTMLResponse as _HTML
         # If already logged in, redirect to home
         session_id = request.cookies.get("doris_mcp_session")
@@ -780,12 +882,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return _HTML(_render_login())
 
     @mcp.custom_route("/mcp/web/login", methods=["POST"])
-    async def semantic_webui_login_submit(request: Request) -> _StarletteResponse:
+    async def semantic_webui_login_submit(request: Request) -> Response:
         from starlette.responses import HTMLResponse as _HTML, RedirectResponse as _R
         try:
             form = await request.form()
-            user = (form.get("user", "") or "").strip()
-            password = (form.get("password", "") or "")
+            user = _form_str(form, "user").strip()
+            password = _form_str(form, "password")
         except Exception:
             return _HTML(_render_login("Invalid form submission."), status_code=400)
 
@@ -800,6 +902,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         session_id = _secrets.token_urlsafe(32)
         _webui_sessions[session_id] = {
             "doris_user": user,
+            "doris_password": password,
             "created_at": time.time(),
             "is_admin": is_admin,
         }
@@ -814,7 +917,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return resp
 
     @mcp.custom_route("/mcp/web/logout", methods=["GET"])
-    async def semantic_webui_logout(request: Request) -> _StarletteResponse:
+    async def semantic_webui_logout(request: Request) -> Response:
         from starlette.responses import RedirectResponse as _R
         session_id = request.cookies.get("doris_mcp_session")
         if session_id:
@@ -1113,7 +1216,24 @@ function wsAction(url,label) {
         filename = request.path_params["filename"]
         if filename.endswith("/delete"):
             filename = filename[:-len("/delete")]
-        action = _get_store(ws).staging_delete(filename)
+
+        # Check cross-file dependencies before staging the delete
+        from tools.dependency import check_delete_dependencies
+        store = _get_store(ws)
+        file_info = store.get_file(filename)
+        if file_info and file_info.get("content"):
+            active_files = {}
+            for f in store.list_files():
+                f_info = store.get_file(f["filename"])
+                if f_info and f_info.get("content"):
+                    active_files[f["filename"]] = f_info["content"]
+            errors = check_delete_dependencies(filename, file_info["content"], active_files)
+            if errors:
+                from starlette.responses import HTMLResponse as _HTML
+                body = "<h2>Cannot Delete</h2><ul>" + "".join(f"<li>{e}</li>" for e in errors) + "</ul>"
+                return _HTML(_render_page(body, client_id, True, ws), status_code=409)
+
+        action = store.staging_delete(filename)
         return _Redirect(f"/mcp/web/models?workspace={ws}&staged=1", status_code=303)
 
     @mcp.custom_route("/mcp/web/{filename:path}/save", methods=["POST"])
@@ -1129,7 +1249,7 @@ function wsAction(url,label) {
         ws = _get_workspace_from_request(request)
         try:
             form = await request.form()
-            content = form.get("content", "")
+            content = _form_str(form, "content")
             _get_store(ws).staging_upsert(filename, content)
             return _Redirect(f"/mcp/web/models?workspace={ws}", status_code=303)
         except Exception as e:
@@ -1147,8 +1267,8 @@ function wsAction(url,label) {
         ws = _get_workspace_from_request(request)
         try:
             form = await request.form()
-            filename = (form.get("filename", "") or "").strip()
-            content = form.get("content", "")
+            filename = _form_str(form, "filename").strip()
+            content = _form_str(form, "content")
             if not filename:
                 body = '<div class="flash flash-err">Filename is required</div>'
                 html = _render_page(body, client_id, True, ws)
@@ -1166,7 +1286,7 @@ function wsAction(url,label) {
 
     @mcp.custom_route("/mcp/web/upload", methods=["POST"])
     async def semantic_webui_upload(request: Request) -> Response:
-        from starlette.responses import HTMLResponse as _HTML, RedirectResponse as _Redirect
+        from starlette.responses import RedirectResponse as _Redirect
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1180,7 +1300,7 @@ function wsAction(url,label) {
         uploaded = 0
         skipped = 0
         for _, upload in form.multi_items():
-            if not hasattr(upload, 'filename') or not upload.filename:
+            if not isinstance(upload, _UploadFile) or not upload.filename:
                 continue
             filename = upload.filename
             if ".." in filename or "/" in filename or "\\" in filename:
@@ -1207,7 +1327,7 @@ function wsAction(url,label) {
     # -- Staging API (validate / commit / discard) --
 
     @mcp.custom_route("/mcp/web/staging/list", methods=["GET"])
-    async def api_staging_list(request: Request) -> JSONResponse:
+    async def api_staging_list(request: Request) -> Response:
         client_id, _, err = await _check_semantic_access(request)
         if err:
             return err
@@ -1216,7 +1336,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": files})
 
     @mcp.custom_route("/mcp/web/staging/validate", methods=["POST"])
-    async def api_staging_validate(request: Request) -> JSONResponse:
+    async def api_staging_validate(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1231,7 +1351,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": {"valid": valid, "message": msg, "details": details}})
 
     @mcp.custom_route("/mcp/web/staging/commit", methods=["POST"])
-    async def api_staging_commit(request: Request) -> JSONResponse:
+    async def api_staging_commit(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1246,7 +1366,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": ok, "data": {"message": msg}})
 
     @mcp.custom_route("/mcp/web/staging/discard", methods=["POST"])
-    async def api_staging_discard(request: Request) -> JSONResponse:
+    async def api_staging_discard(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1264,7 +1384,7 @@ function wsAction(url,label) {
     # ---- Semantic Management API (for CLI, MUST be before {filename:path}) ----
 
     @mcp.custom_route("/mcp/web/semantic/files", methods=["GET"])
-    async def api_semantic_list_files(request: Request) -> JSONResponse:
+    async def api_semantic_list_files(request: Request) -> Response:
         client_id, _, err = await _check_semantic_access(request)
         if err:
             return err
@@ -1273,7 +1393,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": files})
 
     @mcp.custom_route("/mcp/web/semantic/files/{filename:path}", methods=["GET"])
-    async def api_semantic_get_file(request: Request) -> JSONResponse:
+    async def api_semantic_get_file(request: Request) -> Response:
         client_id, _, err = await _check_semantic_access(request)
         if err:
             return err
@@ -1288,7 +1408,7 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": data})
 
     @mcp.custom_route("/mcp/web/semantic/files", methods=["POST"])
-    async def api_semantic_save_file(request: Request) -> JSONResponse:
+    async def api_semantic_save_file(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
@@ -1315,13 +1435,33 @@ function wsAction(url,label) {
         return _JSONResponse({"success": True, "data": {"filename": filename, "staged": True}})
 
     @mcp.custom_route("/mcp/web/semantic/files/{filename:path}", methods=["DELETE"])
-    async def api_semantic_delete_file(request: Request) -> JSONResponse:
+    async def api_semantic_delete_file(request: Request) -> Response:
         client_id, err = await _check_admin_access(request)
         if err:
             return err
         ws = _get_workspace_from_request(request)
         filename = request.path_params["filename"]
-        action = _get_store(ws).staging_delete(filename)
+
+        # Check cross-file dependencies before staging the delete
+        from tools.dependency import check_delete_dependencies
+        store = _get_store(ws)
+        file_info = store.get_file(filename)
+        if file_info and file_info.get("content"):
+            active_files = {}
+            for f in store.list_files():
+                f_info = store.get_file(f["filename"])
+                if f_info and f_info.get("content"):
+                    active_files[f["filename"]] = f_info["content"]
+            errors = check_delete_dependencies(filename, file_info["content"], active_files)
+            if errors:
+                log_tool_call("semantic_delete", client_id=client_id,
+                              params={"filename": filename}, success=False, duration_ms=0)
+                return _JSONResponse(
+                    {"success": False, "error": {"code": "DEPENDENCY_CONFLICT", "message": errors}},
+                    status_code=409,
+                )
+
+        action = store.staging_delete(filename)
         log_tool_call("semantic_delete", client_id=client_id,
                       params={"filename": filename, "action": action}, success=True, duration_ms=0)
         return _JSONResponse({"success": True, "data": {"filename": filename, "action": action}})

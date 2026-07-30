@@ -8,9 +8,8 @@
 #          ./build.sh macos-arm64      # macOS Apple Silicon
 #          ./build.sh                  # 自动检测当前平台
 #
-#   每次构建产出两个自包含包：
+#   每次构建产出一个自包含全量包（server + client + 文档 + Python 运行时）：
 #     dist/doris-mcp-server-{version}-{platform}.tar.gz
-#     dist/doris-mcp-client-{version}-{platform}.tar.gz
 #
 #   清理：  ./build.sh clean
 # =============================================================================
@@ -61,6 +60,52 @@ _detect_native() {
     echo "${os}-${arch}"
 }
 
+# pip --platform tag for a target label (used for cross-builds)
+_pip_platform_tag() {
+    case "$1" in
+        linux-x64)    echo "manylinux2014_x86_64" ;;
+        linux-arm64)  echo "manylinux2014_aarch64" ;;
+        macos-x64)    echo "macosx_10_9_x86_64" ;;
+        macos-arm64)  echo "macosx_11_0_arm64" ;;
+        *) _error "No pip platform tag for '$1'"; exit 1 ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════════════
+# _install_deps_cross — 交叉安装依赖（不执行目标平台二进制）
+#
+# pip --target 只是解压 wheel 到目录，不需要运行目标平台的解释器，
+# 因此可以在 macOS 上为 Linux 构建，反之亦然。
+# ════════════════════════════════════════════════════════════════════
+_install_deps_cross() {
+    local platform_label="$1"
+    local site_packages="$PYTHON_DIR/lib/python${PY_VERSION%.*}/site-packages"
+    local pip_tag
+    pip_tag="$(_pip_platform_tag "$platform_label")"
+
+    local host_py=""
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 &&
+           "$candidate" -m pip --version >/dev/null 2>&1; then
+            host_py="$candidate"; break
+        fi
+    done
+    if [ -z "$host_py" ]; then
+        _error "Cross-build needs a host Python with pip (python3 -m pip)"
+        exit 1
+    fi
+
+    _info "Cross-installing dependencies for $platform_label (tag: $pip_tag) ..."
+    mkdir -p "$site_packages"
+    "$host_py" -m pip install --quiet --upgrade \
+        --platform "$pip_tag" \
+        --python-version "${PY_VERSION%.*}" \
+        --only-binary :all: \
+        --target "$site_packages" \
+        -r "$REQUIREMENTS"
+    _info "Dependencies installed into $site_packages"
+}
+
 # ════════════════════════════════════════════════════════════════════
 # _ensure_python — 确保 python/ 有 Python 3.10 + 全部依赖
 #
@@ -68,19 +113,38 @@ _detect_native() {
 # 然后尝试下载 python-build-standalone
 # ════════════════════════════════════════════════════════════════════
 _ensure_python() {
-    local platform="$1"
+    local platform_label="$1"
+    local platform="$2"
+    local native_label
+    native_label="$(_detect_native)"
+    local is_cross="false"
+    [ "$platform_label" != "$native_label" ] && is_cross="true"
 
-    if [ -x "$PYTHON_DIR/bin/python3" ] && "$PYTHON_DIR/bin/python3" --version >/dev/null 2>&1; then
-        _info "Python ready: $("$PYTHON_DIR/bin/python3" --version 2>&1)"
-        return 0
+    local stamp="$PYTHON_DIR/.build-platform"
+
+    # Reuse an existing python/ only if it was built for this same target.
+    if [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$platform_label" ]; then
+        if [ "$is_cross" = "true" ]; then
+            _info "Python ready (cross-built for $platform_label)"
+            return 0
+        fi
+        if [ -x "$PYTHON_DIR/bin/python3" ] && "$PYTHON_DIR/bin/python3" --version >/dev/null 2>&1; then
+            _info "Python ready: $("$PYTHON_DIR/bin/python3" --version 2>&1)"
+            return 0
+        fi
     fi
     if [ -d "$PYTHON_DIR" ]; then
-        _warn "Python not runnable on this platform, re-creating..."
+        _warn "python/ is stale or for another platform, re-creating..."
         rm -rf "$PYTHON_DIR"
     fi
 
-    # ── Fallback 1: use system/conda Python if provided ──
-    if [ -n "${DORIS_MCP_SYSTEM_PYTHON:-}" ] && [ -x "$DORIS_MCP_SYSTEM_PYTHON" ]; then
+    if [ "$is_cross" = "true" ]; then
+        _info "Cross-build: host=$native_label → target=$platform_label"
+    fi
+
+    # ── Fallback 1: use system/conda Python if provided (native builds only) ──
+    if [ "$is_cross" = "false" ] && \
+       [ -n "${DORIS_MCP_SYSTEM_PYTHON:-}" ] && [ -x "$DORIS_MCP_SYSTEM_PYTHON" ]; then
         _info "Using system Python: $DORIS_MCP_SYSTEM_PYTHON"
         local py_ver
         py_ver=$("$DORIS_MCP_SYSTEM_PYTHON" --version 2>&1)
@@ -111,6 +175,7 @@ _ensure_python() {
         "$PYTHON_DIR/bin/python3" -m pip install --quiet --upgrade pip 2>/dev/null || true
         "$PYTHON_DIR/bin/python3" -m pip install --quiet -r "$REQUIREMENTS"
         _info "Dependencies installed."
+        echo "$platform_label" > "$stamp"
         return 0
     fi
 
@@ -152,101 +217,113 @@ _ensure_python() {
     mkdir -p "$PYTHON_DIR"
     tar xzf "$tarball" -C "$PYTHON_DIR" --strip-components=1
 
-    if [ ! -x "$PYTHON_DIR/bin/python3" ] && [ -x "$PYTHON_DIR/bin/python3.10" ]; then
+    # bin/python3 may be missing (only python3.10 shipped) — link it.
+    if [ ! -e "$PYTHON_DIR/bin/python3" ] && [ -e "$PYTHON_DIR/bin/python3.10" ]; then
         ln -sf python3.10 "$PYTHON_DIR/bin/python3"
     fi
-    if [ ! -x "$PYTHON_DIR/bin/python3" ]; then
-        _error "Python binary not found"; exit 1
+    if [ ! -e "$PYTHON_DIR/bin/python3" ]; then
+        _error "Python binary not found in extracted tarball"; exit 1
     fi
-    _info "Python $("$PYTHON_DIR/bin/python3" --version) ready"
 
-    if ! "$PYTHON_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
-        "$PYTHON_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || true
+    if [ "$is_cross" = "true" ]; then
+        # Target binaries can't run here — install wheels by extraction only.
+        _install_deps_cross "$platform_label"
+    else
+        _info "Python $("$PYTHON_DIR/bin/python3" --version) ready"
+        if ! "$PYTHON_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
+            "$PYTHON_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || true
+        fi
+        _info "Installing dependencies ..."
+        "$PYTHON_DIR/bin/python3" -m pip install --quiet --upgrade pip 2>/dev/null || true
+        "$PYTHON_DIR/bin/python3" -m pip install --quiet -r "$REQUIREMENTS"
+        _info "Dependencies installed."
     fi
-    _info "Installing dependencies ..."
-    "$PYTHON_DIR/bin/python3" -m pip install --quiet --upgrade pip 2>/dev/null || true
-    "$PYTHON_DIR/bin/python3" -m pip install --quiet -r "$REQUIREMENTS"
-    _info "Dependencies installed."
+
+    echo "$platform_label" > "$stamp"
 }
 
 # ═════════════════════════════════════════════════════════════════════════
 # _pack — 打包单个目标
 # ═════════════════════════════════════════════════════════════════════════
+#
+# 用法: _pack <包名> <平台> <相对 SCRIPT_DIR 的路径...>
+#
+# 通过 staging 目录打包，使解压后的顶层目录名 == 包名（如 doris-mcp-server/），
+# 与部署脚本的 ${WORK_DIR}/${name} 约定一致。
 _pack() {
-    local name="$1"         # doris-mcp-server or doris-mcp-client
+    local name="$1"         # doris-mcp-server
     local platform="$2"
-    shift 2                 # 剩下的参数是需要打包的额外路径
+    shift 2                 # 剩下的参数是相对 SCRIPT_DIR 的路径
     local pkg_name="${name}-${VERSION}-${platform}"
     local outfile="$DIST_DIR/${pkg_name}.tar.gz"
 
     _info "Packing: ${pkg_name}.tar.gz"
 
-    local parent_dir base_name
-    parent_dir="$(dirname "$SCRIPT_DIR")"
-    base_name="$(basename "$SCRIPT_DIR")"
+    local stage="$DIST_DIR/.stage"
+    local root="$stage/$name"
+    rm -rf "$stage"
+    mkdir -p "$root"
 
-    cd "$parent_dir"
-    tar czf "$outfile" \
-        --exclude='.git' \
-        --exclude='.gitignore' \
-        --exclude='__pycache__' \
-        --exclude='*.pyc' \
-        --exclude='*.pyo' \
-        --exclude='dist' \
-        --exclude='build' \
-        --exclude='*.egg-info' \
-        --exclude='.DS_Store' \
-        --exclude='python/include' \
-        --exclude='python/share' \
-        --exclude='python/lib/python3.10/test' \
-        --exclude='python/lib/python3.10/idlelib' \
-        --exclude='python/lib/python3.10/turtledemo' \
-        --exclude='python/lib/python3.10/tkinter' \
-        --exclude='python/lib/python3.10/ensurepip' \
-        "$base_name/"python \
-        "$@"
+    # python/ 是所有包的公共部分
+    cp -a "$PYTHON_DIR" "$root/python"
+    for item in "$@"; do
+        cp -a "$SCRIPT_DIR/$item" "$root/"
+    done
+
+    # 瘦身：移除不需要随包分发的内容
+    rm -rf "$root/python/include" "$root/python/share" \
+           "$root/python/lib/python3.10/test" \
+           "$root/python/lib/python3.10/idlelib" \
+           "$root/python/lib/python3.10/turtledemo" \
+           "$root/python/lib/python3.10/tkinter" \
+           "$root/python/lib/python3.10/ensurepip" \
+           "$root/python/.build-platform"
+    find "$root" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    find "$root" \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+
+    ( cd "$stage" && tar czf "$outfile" "$name" )
+    rm -rf "$stage"
 
     local size
     size="$(du -sh "$outfile" | cut -f1)"
-    echo "        ${pkg_name}.tar.gz  (${size})"
+    echo "        ${pkg_name}.tar.gz  (${size})  →  解压为 ${name}/"
 }
 
 # ═════════════════════════════════════════════════════════════════════════
-# build — 构建 server + client 两个包
+# build — 构建单个全量包（server + client + 文档 + Python 运行时）
+#
+# 顶层目录名保持 doris-mcp-server/，与现有部署脚本的
+# ${WORK_DIR}/doris-mcp-server 约定一致，部署脚本无需改动。
 # ═════════════════════════════════════════════════════════════════════════
 build() {
     local platform_label="${1%%|*}"
     local platform_url="${1##*|}"
 
-    _ensure_python "$platform_url"
+    _ensure_python "$platform_label" "$platform_url"
 
     rm -rf "$DIST_DIR"
     mkdir -p "$DIST_DIR"
 
-    local parent_dir base_name
-    parent_dir="$(dirname "$SCRIPT_DIR")"
-    base_name="$(basename "$SCRIPT_DIR")"
-
-    # ── Server 包 ──
     _pack "doris-mcp-server" "$platform_label" \
-        "$base_name/"src \
-        "$base_name/"mcp-server.toml \
-        "$base_name/"start-mcp-server.sh
-
-    # ── Client 包 ──
-    _pack "doris-mcp-client" "$platform_label" \
-        "$base_name/"mcp-client \
-        "$base_name/"mcp-client.sh
+        src \
+        mcp-server.toml \
+        start-mcp-server.sh \
+        mcp-client \
+        mcp-client.sh \
+        README.md \
+        INSTALL.html \
+        doris-mcp-docs.html
 
     echo ""
     echo "  ────────────────────────────────────────────"
     echo "  Build complete!  Platform: $platform_label"
     echo ""
-    echo "  Server:  tar xzf doris-mcp-server-${VERSION}-${platform_label}.tar.gz"
-    echo "           cd ${base_name} && ./start-mcp-server.sh"
+    echo "  tar xzf doris-mcp-server-${VERSION}-${platform_label}.tar.gz"
+    echo "  cd doris-mcp-server"
     echo ""
-    echo "  Client:  tar xzf doris-mcp-client-${VERSION}-${platform_label}.tar.gz"
-    echo "           cd ${base_name} && ./mcp-client.sh ..."
+    echo "    Server:  ./start-mcp-server.sh"
+    echo "    Client:  ./mcp-client.sh ..."
+    echo "    Docs:    README.md, INSTALL.html, doris-mcp-docs.html"
     echo ""
     echo "  No network, no pip, no system Python needed."
     echo "  ────────────────────────────────────────────"
@@ -287,9 +364,9 @@ case "${1:-}" in
         echo ""
         echo "  No argument = auto-detect and build"
         echo ""
-        echo "  Produces two packages in dist/:"
+        echo "  Produces one all-in-one package in dist/:"
         echo "    doris-mcp-server-{version}-{platform}.tar.gz"
-        echo "    doris-mcp-client-{version}-{platform}.tar.gz"
+        echo "    (server + client + docs + Python runtime)"
         exit 1
         ;;
 esac

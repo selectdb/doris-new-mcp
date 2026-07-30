@@ -4,8 +4,9 @@ On first startup, this module creates:
   - dw.orders, dw.users, dw.products, dw.dim_date tables with sample data
   - example semantic model YAML files in active_store_example
 
-All operations use pymysql via admin@127.0.0.1. Idempotent: checks if
-tables/files already exist before creating.
+Connections delegate to store.store._get_conn() which reads request-scoped
+credentials via contextvar.  Idempotent: checks if tables/files already
+exist before creating.
 """
 
 from __future__ import annotations
@@ -13,19 +14,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-import pymysql
+from store.store import _get_conn, set_doris_port as _store_set_port
 
 logger = logging.getLogger("doris_new_mcp.seed")
 
-_DORIS_HOST = "127.0.0.1"
-_DORIS_PORT = 9030
-_DORIS_USER = "admin"
-_DORIS_PASSWORD = ""
-
 
 def set_doris_port(port: int) -> None:
-    global _DORIS_PORT
-    _DORIS_PORT = port
+    _store_set_port(port)
 
 # ---------------------------------------------------------------------------
 # Sample table DDL
@@ -119,8 +114,6 @@ _PRODUCTS_DATA = [
     (4, "背包",       "配饰", "新秀丽", 199.00),
     (5, "智能手表",   "电子", "华为",   899.00),
 ]
-
-_DIM_DATE_DATA: list[tuple] = []
 
 # ---------------------------------------------------------------------------
 # Example semantic model YAML
@@ -261,17 +254,6 @@ time_config:
 # Seed functions
 # ---------------------------------------------------------------------------
 
-def _get_conn() -> pymysql.Connection:
-    return pymysql.connect(
-        host=_DORIS_HOST,
-        port=_DORIS_PORT,
-        user=_DORIS_USER,
-        password=_DORIS_PASSWORD,
-        charset="utf8mb4",
-        autocommit=True,
-    )
-
-
 def seed_example_data() -> bool:
     """Create example database tables with sample data. Idempotent.
     
@@ -300,7 +282,8 @@ def seed_example_data() -> bool:
                 ("dw.products", _PRODUCTS_DATA),
             ]:
                 cur.execute(f"SELECT COUNT(*) FROM {table}")
-                cnt = cur.fetchone()[0]
+                row = cur.fetchone()
+                cnt = row[0] if row else 0
                 if cnt == 0:
                     columns = {
                         "dw.orders": "order_id, user_id, product_id, amount, channel, status, order_date",
@@ -321,10 +304,11 @@ def seed_example_data() -> bool:
 
             # Seed dim_date
             cur.execute("SELECT COUNT(*) FROM dw.dim_date")
-            if cur.fetchone()[0] == 0:
+            row = cur.fetchone()
+            if row and row[0] == 0:
+                from datetime import date as _date, timedelta as _timedelta
                 for i in range(365):
-                    from datetime import date, timedelta
-                    d = date(2026, 1, 1) + timedelta(days=i)
+                    d = _date(2026, 1, 1) + _timedelta(days=i)
                     cur.execute(
                         "INSERT INTO dw.dim_date VALUES (%s, %s, %s, %s, %s)",
                         (d.strftime("%Y-%m-%d"), d.year, d.month, d.day, d.strftime("%A")),
@@ -364,7 +348,8 @@ def seed_example_models() -> bool:
 
             # Check if already seeded
             cur.execute("SELECT COUNT(*) FROM active_store_example")
-            if cur.fetchone()[0] > 0:
+            row = cur.fetchone()
+            if row and row[0] > 0:
                 return False
 
             # Insert example models

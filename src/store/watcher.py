@@ -3,9 +3,8 @@
 Each workspace:
   - Own store (active_store_{name})
   - Own manifest + compiler (MetricFlowEngine)
-  - Independent 60s polling for changes
+  - On-demand freshness via ensure_fresh() (no background polling)
   - Independent toggle (semantic_enabled per workspace)
-  - New workspaces auto-discovered via table scan
 
 Global router: metric_name → (engine, workspace_name)
 """
@@ -19,7 +18,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.health import ComponentStatus, service_health
 from store.store import DorisStore
 from store.version import SemanticLayerVersion, VersionTracker
 
@@ -199,7 +197,12 @@ class MetricRouter:
 # ---------------------------------------------------------------------------
 
 class MultiWorkspaceWatcher:
-    """Manages N workspaces, each with independent store/polling/engine."""
+    """Manages N workspaces, each with independent store/polling/engine.
+
+    Workspaces are discovered and loaded ON DEMAND — no background
+    polling.  Every store operation runs in request context so the
+    credential contextvar is available.
+    """
 
     def __init__(
         self,
@@ -213,14 +216,12 @@ class MultiWorkspaceWatcher:
 
         self._workspaces: dict[str, WorkspaceState] = {}
         self._router = MetricRouter()
-        self._stop_event = threading.Event()
-        self._discovery_thread: threading.Thread | None = None
 
         # P2-1: Track which workspaces have had staging validated since last change
         self._staging_validated: set[str] = set()
 
-        # Bootstrap existing workspaces
-        self._init_all()
+        # Lazy-init guards
+        self._initialized: bool = False
 
     # ------------------------------------------------------------------
     # Properties
@@ -252,16 +253,24 @@ class MultiWorkspaceWatcher:
         return name in self._workspaces
 
     # ------------------------------------------------------------------
-    # Init
+    # Lazy init — called once on first authenticated request
     # ------------------------------------------------------------------
 
-    def _init_all(self) -> None:
-        """Scan Doris for existing workspace tables and init each."""
+    def initialize(self) -> None:
+        """Discover and bootstrap all workspaces from Doris.
+
+        Must be called within request context (credentials must be set
+        via set_request_credentials before calling this).
+        """
+        if self._initialized:
+            return
         existing = DorisStore.discover_workspaces()
         if not existing:
             logger.warning("No workspace tables found in system_mcp (active_store_*)")
         for ws_name in existing:
             self._init_workspace(ws_name, first_load=True)
+        self._initialized = True
+        logger.info(f"Watcher initialized: {len(self._workspaces)} workspace(s)")
 
     def _init_workspace(self, ws_name: str, first_load: bool = False) -> WorkspaceState:
         store = DorisStore(workspace=ws_name)
@@ -281,10 +290,8 @@ class MultiWorkspaceWatcher:
         self._workspaces[ws_name] = ws
 
         if first_load:
-            # Bootstrap immediately
             self._reload_workspace(ws)
         else:
-            # Set initial revision for polling
             try:
                 ws.known_revision = store.check_remote().revision
             except Exception:
@@ -295,67 +302,68 @@ class MultiWorkspaceWatcher:
         return ws
 
     # ------------------------------------------------------------------
-    # Poll loop
+    # On-demand freshness (called within request context)
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
-        self._stop_event.clear()
-        self._discovery_thread = threading.Thread(
-            target=self._poll_loop, daemon=True, name="ws-discovery"
-        )
-        self._discovery_thread.start()
-        service_health.get("config_watcher").set_healthy("Multi-workspace poll (60s)")
-        logger.info(f"Multi-workspace watcher started ({len(self._workspaces)} workspace(s))")
+    _FRESHNESS_TTL = 60.0  # seconds between reload checks
 
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._discovery_thread:
-            self._discovery_thread.join(timeout=5)
-        self._discovery_thread = None
+    def ensure_fresh(self, workspace_name: str) -> WorkspaceState | None:
+        """Ensure the workspace manifest/compiler is up-to-date.
 
-    def _poll_loop(self) -> None:
-        _POLL_INTERVAL = 60
-        while not self._stop_event.is_set():
+        Called from tool handlers within request context.  If the
+        workspace hasn't been loaded yet, discovers it.  Cooldown
+        prevents redundant reloads within _FRESHNESS_TTL seconds.
+
+        Returns WorkspaceState on success, None if workspace not found
+        or store unavailable.
+        """
+        # Lazy discover
+        if workspace_name not in self._workspaces:
             try:
-                # 1. Check existing workspaces for version changes
-                for ws_name, ws in list(self._workspaces.items()):
-                    if ws.parsing:
-                        continue
-                    try:
-                        new_ver = ws.store.check_remote().revision
-                        if new_ver and new_ver != ws.known_revision:
-                            logger.info(
-                                f"[{ws_name}] Version change: {ws.known_revision[:8] if ws.known_revision else '?'} → {new_ver[:8]}"
-                            )
-                            self._reload_workspace_async(ws)
-                    except Exception:
-                        logger.exception(f"[{ws_name}] Poll check failed")
-
-                # 2. Discover new / remove stale workspace tables
-                current = set(DorisStore.discover_workspaces())
-                known = set(self._workspaces.keys())
-                for new_ws in current - known:
-                    logger.info(f"New workspace discovered: {new_ws}")
-                    self._init_workspace(new_ws)
-                for stale in known - current:
-                    logger.info(f"Workspace removed (tables dropped): {stale}")
-                    self._workspaces.pop(stale, None)
-                    DorisStore._table_cache.pop(stale, None)  # clear cache so re-creation works
-                    self._router.rebuild(self._workspaces)
-
+                existing = set(DorisStore.discover_workspaces())
             except Exception:
-                logger.exception("Poll loop error")
-            self._stop_event.wait(_POLL_INTERVAL)
+                logger.warning(f"ensure_fresh [{workspace_name}]: discover failed")
+                return None
+            if workspace_name in existing:
+                self._init_workspace(workspace_name, first_load=True)
+            else:
+                logger.warning(f"ensure_fresh [{workspace_name}]: workspace not found")
+                return None
+
+        ws = self._workspaces.get(workspace_name)
+        if ws is None:
+            return None
+
+        if ws.parsing:
+            return ws
+
+        # Cooldown — skip reload if fresh enough
+        current = ws.version_tracker.current
+        if current is not None and time.time() - current.loaded_epoch < self._FRESHNESS_TTL:
+            return ws
+
+        # Check if revision changed.  A failure here means we cannot tell
+        # whether the loaded manifest is current; serving it anyway would
+        # hand back silently-outdated metric definitions, so refuse instead.
+        try:
+            new_rev = ws.store.check_remote().revision
+        except Exception:
+            logger.exception(
+                f"ensure_fresh [{workspace_name}]: revision check failed, "
+                f"refusing to serve a possibly stale manifest"
+            )
+            return None
+
+        if current is not None and new_rev == ws.known_revision:
+            ws.version_tracker.touch_epoch()
+            return ws
+
+        self._reload_workspace(ws)
+        return ws
 
     # ------------------------------------------------------------------
     # Reload
     # ------------------------------------------------------------------
-
-    def _reload_workspace_async(self, ws: WorkspaceState) -> None:
-        thread = threading.Thread(
-            target=self._reload_workspace, args=(ws,), daemon=True
-        )
-        thread.start()
 
     def _reload_workspace(self, ws: WorkspaceState) -> None:
         if ws.parsing:
@@ -402,10 +410,12 @@ class MultiWorkspaceWatcher:
 
             ws.known_revision = ws.store.check_remote().revision
             duration = (time.monotonic() - t0) * 1000
+            now_epoch = time.time()
 
-            # Update version tracker
+            # Update version tracker (with epoch for cooldown)
             version = SemanticLayerVersion(
                 loaded_at=SemanticLayerVersion.now_iso(),
+                loaded_epoch=now_epoch,
                 revision=ws.known_revision,
                 source_type=ws.store.store_type,
                 source_uri=ws.store.source_uri,
@@ -437,13 +447,15 @@ class MultiWorkspaceWatcher:
             return "rejected", f"Workspace not found: {workspace}"
         if ws.parsing:
             return "already_running", "Reload already in progress"
-        
+
         ws.known_revision = ""
-        thread = threading.Thread(
-            target=self._reload_workspace, args=(ws,), daemon=True
-        )
-        thread.start()
-        return "accepted", "Reload submitted"
+        self._reload_workspace(ws)
+        # _reload_workspace handles its own exceptions internally;
+        # check the version tracker to determine success.
+        ver = ws.version_tracker.current
+        if ver is None or not ver.last_reload_success:
+            return "failed", "Reload failed — check server logs for details"
+        return "done", f"Reload completed ({ver.revision[:12]})"
 
     # ------------------------------------------------------------------
     # Staging
@@ -471,14 +483,13 @@ class MultiWorkspaceWatcher:
                 shutil.rmtree(str(tmp_models), ignore_errors=True)
                 return False, "No valid YAML files in staging", None
 
-            from store.bootstrap import pre_validate_physical
+            from store.bootstrap import bootstrap, pre_validate_physical
             ok, err = pre_validate_physical(tmp_models)
             if not ok:
                 shutil.rmtree(str(tmp_models), ignore_errors=True)
                 return False, f"Physical validation failed: {err}", {"phase": "physical"}
 
             tmp_ws = Path(tempfile.mkdtemp(prefix=f"stg_ws_{workspace}_"))
-            from store.bootstrap import bootstrap
             ok, err = bootstrap(self._config_dir, tmp_ws, models_dir=tmp_models)
             if not ok:
                 shutil.rmtree(str(tmp_models), ignore_errors=True)
