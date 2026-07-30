@@ -238,11 +238,11 @@ class SessionAffinityProxy:
         except httpx.TimeoutException:
             logger.warning("Session-affinity upstream timed out")
             if not response_started and not response_start_attempted:
-                await self._send_error(send, 504, b"Gateway Timeout")
+                await self._send_relogin(send)
         except (httpx.HTTPError, UnicodeError, ValueError):
             logger.warning("Session-affinity upstream request failed")
             if not response_started and not response_start_attempted:
-                await self._send_error(send, 502, b"Bad Gateway")
+                await self._send_relogin(send)
         finally:
             if response is not None:
                 try:
@@ -304,6 +304,32 @@ class SessionAffinityProxy:
             })
             await SessionAffinityProxy._send_downstream(
                 send, {"type": "http.response.body", "body": body, "more_body": False}
+            )
+        except _ClientDisconnected:
+            return
+
+    async def _send_relogin(
+        self, send: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        """Clear the session cookie and redirect the browser to the login page.
+
+        Called when the upstream node that owns this session is unreachable.
+        The login page is always handled locally, so the user can re-login
+        on whichever healthy node receives the redirect.
+        """
+        try:
+            await self._send_downstream(send, {
+                "type": "http.response.start",
+                "status": 303,
+                "headers": [
+                    (b"location", b"/mcp/web/login"),
+                    (b"set-cookie", self.cookie_name.encode("ascii") + b"=; Max-Age=0; Path=/mcp/web; HttpOnly; SameSite=Lax"),
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", b"0"),
+                ],
+            })
+            await self._send_downstream(
+                send, {"type": "http.response.body", "body": b"", "more_body": False}
             )
         except _ClientDisconnected:
             return

@@ -224,18 +224,19 @@ class SessionAffinityProxyRoutingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.aclose()
 
-    async def test_upstream_connection_protocol_and_timeout_errors_are_safe_gateway_errors(self) -> None:
-        for error, expected in ((httpx.ConnectError("refused"), 502), (httpx.ProtocolError("bad protocol"), 502),
-                                (httpx.ReadTimeout("slow"), 504)):
+    async def test_upstream_connection_protocol_and_timeout_errors_clear_cookie_and_redirect(self) -> None:
+        for error in (httpx.ConnectError("refused"), httpx.ProtocolError("bad protocol"),
+                       httpx.ReadTimeout("slow")):
             def handler(request: httpx.Request, error: httpx.HTTPError = error) -> httpx.Response:
                 raise error
             proxy, _, requests, client = self.make_proxy(handler)
             try:
                 result = await self.invoke(proxy, headers=[(b"cookie", b"doris_mcp_session=remote")])
-                self.assertEqual(result[0]["status"], expected)
+                self.assertEqual(result[0]["status"], 303)
+                location = [v for n, v in result[0]["headers"] if n.lower() == b"location"]
+                self.assertEqual(location, [b"/mcp/web/login"])
                 wire = b"".join(value for _, value in result[0]["headers"]) + self.response_body(result)
                 self.assertNotIn(REMOTE_IP.encode(), wire)
-                self.assertNotIn(b"doris_mcp_session", wire)
                 self.assertEqual(len(requests), 1)
             finally:
                 await client.aclose()
