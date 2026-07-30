@@ -30,6 +30,6 @@ rotation_backup_count = 30        # 保留的轮转文件数
 [query]
 pool_min_size = 0                 # 连接池最小连接数（admin pool + per-user pool）
 pool_max_size = 10                # 连接池最大连接数
-pool_idle_timeout_seconds = 300   # 空闲连接超时回收（秒）
+pool_idle_timeout_seconds = 300   # 空闲连接超时回收（秒）；作为 aiomysql pool_recycle，应小于 Doris wait_timeout
 query_timeout_seconds = 600       # SQL 查询超时（秒）
 query_max_rows = 10000            # 单次查询最大返回行数
