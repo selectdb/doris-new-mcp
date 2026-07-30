@@ -31,6 +31,7 @@ from core.audit import init_audit_log, log_tool_call
 from core.connection import ConnectionPool
 from core.pool_manager import PoolManager
 from core.response import ErrorCode, error_response, success_response
+from core.sensitive_mask import mask_sensitive
 from tools.discovery import (
     describe_table as _describe_table,
     list_databases as _list_databases,
@@ -669,7 +670,7 @@ def create_server(
         parsed = json.loads(result)
         actual_success = parsed.get("success", False)
 
-        log_tool_call("execute_query", client_id=auth.client_id, params={"sql": sql[:200], "database": database},
+        log_tool_call("execute_query", client_id=auth.client_id, params={"sql": mask_sensitive(sql[:200]), "database": database},
                       success=actual_success, duration_ms=duration, metricflow=False)
         return result
 

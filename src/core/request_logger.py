@@ -6,6 +6,8 @@ import time
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from core.sensitive_mask import mask_dict, mask_sensitive
+
 logger = logging.getLogger("doris_new_mcp.request_logger")
 logger.setLevel(logging.DEBUG)
 
@@ -58,15 +60,16 @@ class RequestLoggerMiddleware:
                 status_code = message.get("status", 0)
             await send(message)
 
-        # Log request line
+        # Log request line (headers masked — they carry Authorization/Cookie)
         url = path + (f"?{query}" if query else "")
         logger.info("=" * 72)
         logger.info(f">>> {method} {url}")
-        logger.info(f"    Headers: {json.dumps(headers, ensure_ascii=False, indent=None)}")
+        logger.info(f"    Headers: {json.dumps(mask_dict(headers), ensure_ascii=False, indent=None)}")
 
         await self.app(scope, receive_wrapper, send_wrapper)
 
-        # Log body (after it has been consumed)
+        # Log body (after it has been consumed; masked — e.g. the WebUI
+        # login form posts the Doris password in plaintext)
         raw_body = b"".join(body_chunks)
         if raw_body:
             try:
@@ -74,9 +77,9 @@ class RequestLoggerMiddleware:
                 # Try to pretty-print JSON
                 try:
                     body_json = json.loads(body_text)
-                    logger.info(f"    Body: {json.dumps(body_json, ensure_ascii=False)}")
+                    logger.info(f"    Body: {mask_sensitive(json.dumps(body_json, ensure_ascii=False))}")
                 except json.JSONDecodeError:
-                    logger.info(f"    Body: {body_text[:2000]}")
+                    logger.info(f"    Body: {mask_sensitive(body_text[:2000])}")
             except UnicodeDecodeError:
                 logger.info(f"    Body: <binary {len(raw_body)} bytes>")
         else:
