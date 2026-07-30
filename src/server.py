@@ -756,7 +756,6 @@ def create_server(
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
         return result
 
-    # Semantic guard state
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False)
     )

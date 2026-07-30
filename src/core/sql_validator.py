@@ -74,26 +74,3 @@ def validate_readonly(sql: str) -> tuple[bool, str]:
 
     stmt_type = type(node).__name__
     return False, f"Statement type '{stmt_type}' not allowed in read-only mode"
-
-
-def validate_write(sql: str) -> tuple[bool, str]:
-    """Validate SQL for execute_sql (write mode).
-
-    Allows most statements but blocks extremely dangerous ones
-    unless explicitly enabled.
-    """
-    stripped = sql.strip().rstrip(";").strip()
-    if not stripped:
-        return False, "Empty SQL statement"
-
-    # Block multiple statements
-    try:
-        statements = sqlglot.parse(stripped, dialect="doris")
-    except sqlglot.errors.ParseError:
-        # Let Doris handle the parse error
-        return True, ""
-
-    if len(statements) > 1:
-        return False, "Multiple statements not allowed"
-
-    return True, ""
