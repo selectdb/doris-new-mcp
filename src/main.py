@@ -14,9 +14,10 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = AppConfig(args.config_dir, env_file=args.env_file)
-    # Resolve once so the server and affinity middleware identify this same node.
-    machine_ip = resolve_machine_ip(cfg.mcp.private_ip)
-    webui_ip = cfg.mcp.private_ip or machine_ip
+    # Machine IP for local Doris connections — always auto-detected.
+    machine_ip = resolve_machine_ip("")
+    # Web UI IP for session cookies — configured or same as machine.
+    webui_ip = resolve_machine_ip(cfg.mcp.private_ip) if cfg.mcp.private_ip else machine_ip
 
     mcp = create_server(
         config_dir=args.config_dir,

@@ -360,14 +360,12 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    # Machine IP for local Doris connections (always the real local address).
-    _MACHINE_IP = resolve_machine_ip(
-        machine_ip if machine_ip is not None else cfg.mcp.private_ip
-    )
+    # Machine IP for local Doris connections — always the real local address.
+    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip("")
     # Web UI IP written into session cookies.  When ``privateIp`` is configured
     # this points browsers at the designated node; otherwise it matches the
     # local machine address (cookie-affinity mode).
-    _WEBUI_IP = resolve_machine_ip(webui_ip) if webui_ip is not None else _MACHINE_IP
+    _WEBUI_IP = webui_ip if webui_ip is not None else _MACHINE_IP
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql

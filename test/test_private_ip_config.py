@@ -91,9 +91,13 @@ class MainPrivateIpFlowTests(unittest.TestCase):
         ):
             app_main.main()
 
-        resolve.assert_called_once_with(cfg.mcp.private_ip)
+        # machine_ip via auto-detect, webui_ip via configured privateIp
+        self.assertEqual(resolve.call_count, 2)
+        resolve.assert_any_call("")
+        resolve.assert_any_call(cfg.mcp.private_ip)
         create.assert_called_once_with(
-            config_dir="/offline-config", env_file=None, machine_ip="10.20.30.40", webui_ip="10.20.30.40"
+            config_dir="/offline-config", env_file=None,
+            machine_ip="10.20.30.40", webui_ip="10.20.30.40"
         )
         mcp.run.assert_called_once()
 
