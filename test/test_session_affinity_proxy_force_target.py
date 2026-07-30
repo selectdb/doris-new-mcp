@@ -155,7 +155,7 @@ class ForceTargetTests(unittest.IsolatedAsyncioTestCase):
 
     # ── force_target 不可达 → 303 重登录 ──────────────────────
 
-    async def test_force_target_unreachable_redirects_to_login(self) -> None:
+    async def test_force_target_unreachable_returns_503_with_html(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("refused")
 
@@ -165,9 +165,13 @@ class ForceTargetTests(unittest.IsolatedAsyncioTestCase):
             await proxy(_scope(), _receiver(), send)
         finally:
             await client.aclose()
-        self.assertIn(sent[0]["status"], (302, 303))
-        location = [v for n, v in sent[0]["headers"] if n.lower() == b"location"]
-        self.assertEqual(location, [b"/mcp/web/login"])
+        self.assertEqual(sent[0]["status"], 503)
+        content_type = [v for n, v in sent[0]["headers"] if n.lower() == b"content-type"]
+        self.assertIn(b"text/html", content_type[0])
+        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        self.assertIn(b"Session lost", body)
+        # 不泄露目标 IP
+        self.assertNotIn(FORCE_TARGET.encode(), body)
 
     # ── 不配 force_target → login 保持本地 ────────────────────
 
