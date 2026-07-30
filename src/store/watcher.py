@@ -470,31 +470,6 @@ class MultiWorkspaceWatcher:
         # P2-1: Clear validation tracking at start (re-validated on success)
         self._staging_validated.discard(workspace)
 
-        pending_deletes = [
-            item["filename"] for item in stg_files if item.get("action") == "delete"
-        ]
-        if pending_deletes:
-            from tools.dependency import check_delete_dependencies
-
-            active_files = {
-                entry["filename"]: file_info["content"]
-                for entry in ws.store.list_files()
-                if (file_info := ws.store.get_file(entry["filename"])) and file_info.get("content")
-            }
-            dependency_errors = [
-                error
-                for filename in pending_deletes
-                if (deleted_content := active_files.get(filename))
-                for error in check_delete_dependencies(filename, deleted_content, active_files)
-            ]
-
-            if dependency_errors:
-                return False, f"Validation failed: {dependency_errors[0]}", {
-                    "phase": "dependencies",
-                    "staging_files": stg_files,
-                    "errors": dependency_errors,
-                }
-
         try:
             tmp_models = Path(tempfile.mkdtemp(prefix=f"stg_{workspace}_"))
             ws.store.staging_fetch(tmp_models)

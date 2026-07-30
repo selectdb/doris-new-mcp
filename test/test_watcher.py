@@ -19,7 +19,6 @@ import time
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -74,39 +73,6 @@ class FakeStore:
         return ["example", "test"]
 
 
-class DeleteDependencyStore:
-    """Store fixture that exposes a deleted YAML and one dependent YAML."""
-
-    _files = {
-        "orders.yaml": """semantic_model:
-  name: orders
-  measures:
-    - name: total_amount
-      agg: sum
-""",
-        "revenue.yaml": """semantic_model:
-  name: revenue
-  metrics:
-    - name: total_revenue
-      type: derived
-      expr: total_amount
-""",
-    }
-
-    def staging_list(self):
-        return [{"filename": "orders.yaml", "action": "delete"}]
-
-    def list_files(self):
-        return [{"filename": filename} for filename in self._files]
-
-    def get_file(self, filename):
-        content = self._files.get(filename)
-        return {"filename": filename, "content": content} if content else None
-
-    def staging_fetch(self, _models_dir):
-        raise AssertionError("Dependency validation should fail before staging fetch")
-
-
 # ── Helpers to build a minimal WorkspaceState ──
 
 def _make_workspace_state(
@@ -143,24 +109,6 @@ def _make_workspace_state(
 # ══════════════════════════════════════════════════════════════════
 # Test cases
 # ══════════════════════════════════════════════════════════════════
-
-class TestValidateStagingDependencies(unittest.TestCase):
-    def test_delete_with_active_yaml_dependency_fails_validation(self):
-        from store.watcher import MultiWorkspaceWatcher
-
-        watcher = MultiWorkspaceWatcher.__new__(MultiWorkspaceWatcher)
-        watcher._workspaces = {
-            "test": SimpleNamespace(store=DeleteDependencyStore()),
-        }
-        watcher._staging_validated = set()
-
-        valid, message, details = watcher.validate_staging("test")
-
-        self.assertFalse(valid)
-        self.assertEqual(details["phase"], "dependencies")
-        self.assertIn("revenue.yaml", " ".join(details["errors"]))
-        self.assertIn("total_amount", message)
-
 
 class TestEnsureFreshCooldown(unittest.TestCase):
     """Tests for the 1-minute cooldown behaviour."""
