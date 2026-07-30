@@ -98,6 +98,29 @@ def get_machine_ip() -> str:
         sock.close()
 
 
+def resolve_machine_ip(configured_private_ip: str | None) -> str:
+    """Resolve this node's RFC-1918 IPv4, preferring an explicit configuration."""
+    if configured_private_ip is None:
+        candidate = ""
+    elif isinstance(configured_private_ip, str):
+        candidate = configured_private_ip.strip()
+    else:
+        raise ValueError("Configured private IP must be a string or null")
+
+    source = "Configured private IP"
+    if not candidate:
+        candidate = get_machine_ip()
+        source = "Automatically detected machine IP"
+
+    try:
+        parsed_ip = ipaddress.ip_address(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}") from exc
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}")
+    return parsed_ip.compressed
+
+
 def create_server(
     config_dir: str | None = None,
     env_file: str | None = None,
@@ -336,7 +359,11 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    _MACHINE_IP = machine_ip if machine_ip is not None else get_machine_ip()
+    # This is this node's address for local Doris connections and session cookies,
+    # not a fixed remote target for request routing.
+    _MACHINE_IP = resolve_machine_ip(
+        machine_ip if machine_ip is not None else cfg.mcp.private_ip
+    )
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql

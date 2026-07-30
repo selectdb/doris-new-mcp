@@ -4,7 +4,7 @@ import argparse
 import os
 
 from config.loader import AppConfig
-from server import _decode_webui_session_cookie, create_server, get_machine_ip
+from server import _decode_webui_session_cookie, create_server, resolve_machine_ip
 
 
 def main() -> None:
@@ -14,7 +14,8 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = AppConfig(args.config_dir, env_file=args.env_file)
-    machine_ip = get_machine_ip()
+    # Resolve once so the server and affinity middleware identify this same node.
+    machine_ip = resolve_machine_ip(cfg.mcp.private_ip)
 
     mcp = create_server(
         config_dir=args.config_dir,
