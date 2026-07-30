@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from src.core.session_affinity_proxy import SessionAffinityProxy
+_src = Path(__file__).resolve().parent.parent / "src"
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
+from core.session_affinity_proxy import SessionAffinityProxy  # noqa: E402
 
 
-REMOTE_IP = "198.51.100.77"
+REMOTE_IP = "10.23.45.67"
 LOCAL_IP = "127.0.0.1"
 COOKIE = "doris_mcp_session"
 
@@ -156,7 +162,7 @@ class SessionAffinityProxyRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result[0]["status"], 202)
             request = self.assert_and_return_one_request(requests)
             self.assertEqual(request.method, "PATCH")
-            self.assertEqual(str(request.url), "http://198.51.100.77:8080/mcp/web/a%2Fb?x=%2F&tag=one&tag=two")
+            self.assertEqual(str(request.url), f"http://{REMOTE_IP}:8080/mcp/web/a%2Fb?x=%2F&tag=one&tag=two")
             self.assertEqual(await request.aread(), b"request-body")
             raw = request.headers.raw
             self.assertIn((b"x-normal", b"one"), raw)
@@ -192,18 +198,28 @@ class SessionAffinityProxyRoutingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.aclose()
 
-    async def test_upstream_response_status_headers_and_multiple_set_cookie_are_transparent(self) -> None:
+    async def test_upstream_response_filters_connection_nominated_headers_and_keeps_cookies(self) -> None:
         def handler(_: httpx.Request) -> httpx.Response:
-            return httpx.Response(207, headers=[("x-ordinary", "ok"), ("set-cookie", "a=1"),
-                                                 ("set-cookie", "b=2"), ("connection", "close")], content=b"response")
+            return httpx.Response(
+                207,
+                headers=[("X-Ordinary", "ok"), ("Set-Cookie", "a=1"), ("Set-Cookie", "b=2"),
+                         ("Connection", "X-Remove"), ("X-Remove", "gone")],
+                content=b"response",
+            )
+
         proxy, _, _, client = self.make_proxy(handler)
         try:
             result = await self.invoke(proxy, headers=[(b"cookie", b"doris_mcp_session=remote")])
             self.assertEqual(result[0]["status"], 207)
             response_headers = result[0]["headers"]
             self.assertIn((b"x-ordinary", b"ok"), response_headers)
-            self.assertEqual([value for name, value in response_headers if name.lower() == b"set-cookie"], [b"a=1", b"b=2"])
+            self.assertEqual(
+                [value for name, value in response_headers if name == b"set-cookie"],
+                [b"a=1", b"b=2"],
+            )
             self.assertNotIn(b"connection", {name.lower() for name, _ in response_headers})
+            self.assertNotIn(b"x-remove", {name.lower() for name, _ in response_headers})
+            self.assertTrue(all(name == name.lower() for name, _ in response_headers))
             self.assertEqual(self.response_body(result), b"response")
         finally:
             await client.aclose()

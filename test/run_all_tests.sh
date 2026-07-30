@@ -111,10 +111,17 @@ smoke_test() {
     return 0
 }
 
-# ── Main ─────────────────────────────────────────
-check_server
+# ── 离线单元测试（无需启动 MCP Server） ─────────
+run_offline_unit_tests() {
+    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_routing.py" "会话亲和代理路由离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_streaming.py" "会话亲和代理流式离线单元测试" || ((FAIL_COUNT += 1))
+}
 
+# ── Main ─────────────────────────────────────────
 FAIL_COUNT=0
+# Keep these deterministic tests ahead of every live-server test stage.
+run_offline_unit_tests
+check_server
 
 case "${1:-}" in
     --tools)

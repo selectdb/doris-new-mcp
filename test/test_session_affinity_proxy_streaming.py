@@ -34,6 +34,18 @@ class RecordingStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class ConsumingTransport(httpx.AsyncBaseTransport):
+    """A real httpx transport that records streamed request bytes."""
+
+    def __init__(self):
+        self.request_chunks = []
+        self.response_stream = RecordingStream([b"first-response", b"second-response"])
+
+    async def handle_async_request(self, request):
+        self.request_chunks.append([chunk async for chunk in request.stream])
+        return httpx.Response(209, stream=self.response_stream, request=request)
+
+
 class FakeClient:
     """Small client double which consumes request streams without a network."""
 
@@ -132,15 +144,61 @@ class SessionAffinityProxyStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([message["more_body"] for message in sent[1:]], [True, True, False])
         self.assertTrue(stream.closed)
 
-    async def test_upstream_response_is_closed_after_success_and_stream_error(self):
-        for error in (None, httpx.ReadError("broken upstream")):
-            with self.subTest(error=error):
-                stream = RecordingStream([b"part"], error=error)
-                sent = []
-                await self.remote_proxy(FakeClient(httpx.Response(200, stream=stream)))(
-                    self.remote_scope(), self.receiver([{"type": "http.request", "more_body": False}]), self.sender(sent)
-                )
-                self.assertTrue(stream.closed)
+    async def test_upstream_response_is_closed_after_success(self):
+        stream = RecordingStream([b"part"])
+        await self.remote_proxy(FakeClient(httpx.Response(200, stream=stream)))(
+            self.remote_scope(), self.receiver([{"type": "http.request", "more_body": False}]), self.sender([])
+        )
+        self.assertTrue(stream.closed)
+
+    async def test_read_error_after_response_start_does_not_append_gateway_error(self):
+        stream = RecordingStream([b"visible-part"], error=httpx.ReadError("broken upstream"))
+        sent = []
+        await self.remote_proxy(FakeClient(httpx.Response(200, stream=stream)))(
+            self.remote_scope(), self.receiver([{"type": "http.request", "more_body": False}]), self.sender(sent)
+        )
+        starts = [message for message in sent if message["type"] == "http.response.start"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0]["status"], 200)
+        self.assertNotIn(502, [message["status"] for message in starts])
+        self.assertNotIn(504, [message["status"] for message in starts])
+        self.assertIn(b"visible-part", [message.get("body", b"") for message in sent])
+        self.assertTrue(stream.closed)
+
+    async def test_real_async_client_consumes_request_stream_and_returns_multi_chunk_response(self):
+        transport = ConsumingTransport()
+        client = httpx.AsyncClient(transport=transport)
+        sent = []
+        proxy = self.remote_proxy(client)
+        try:
+            await proxy(
+                self.remote_scope(),
+                self.receiver([
+                    {"type": "http.request", "body": b"first-", "more_body": True},
+                    {"type": "http.request", "body": b"second", "more_body": False},
+                ]),
+                self.sender(sent),
+            )
+        finally:
+            await client.aclose()
+        self.assertIs(proxy._client, client)
+        self.assertEqual(transport.request_chunks, [[b"first-", b"second"]])
+        self.assertEqual(
+            [message["body"] for message in sent if message["type"] == "http.response.body"],
+            [b"first-response", b"second-response", b""],
+        )
+        self.assertTrue(transport.response_stream.closed)
+        self.assertTrue(client.is_closed)
+
+    async def test_oserror_from_send_ends_normally_and_closes_upstream(self):
+        stream = RecordingStream([b"part"])
+        sent = []
+        await self.remote_proxy(FakeClient(httpx.Response(200, stream=stream)))(
+            self.remote_scope(), self.receiver([{"type": "http.request", "more_body": False}]),
+            self.sender(sent, OSError("client socket closed")),
+        )
+        self.assertEqual([message["type"] for message in sent], ["http.response.start", "http.response.body"])
+        self.assertTrue(stream.closed)
 
     async def test_response_send_cancellation_propagates_and_closes_upstream(self):
         stream = RecordingStream([b"part"])
@@ -202,6 +260,7 @@ class SessionAffinityProxyStreamingTests(unittest.IsolatedAsyncioTestCase):
             await proxy({"type": "lifespan"}, self.receiver([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]), self.sender(messages))
             await proxy.aclose()
         self.assertEqual(len(made), 1)
+        self.assertFalse(made[0].kwargs["trust_env"])
         self.assertEqual(made[0].closed, 1)
 
     async def test_owned_client_is_reused_and_explicit_aclose_closes_it(self):
