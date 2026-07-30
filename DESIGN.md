@@ -507,19 +507,18 @@ doris-mcp-client semantic status
 ./build.sh clean           # 清理 python/、dist/、构建产物
 ```
 
-从 `astral-sh/python-build-standalone` 下载 Python 3.10 独立发行版，根据 `requirements.txt` 安装依赖，生成两个自包含 tar.gz 包到 `dist/`：
+从 `astral-sh/python-build-standalone` 下载 Python 3.10 独立发行版，根据 `requirements.txt` 安装依赖，生成一个自包含全量 tar.gz 包（server + client + 文档 + Python 运行时）到 `dist/`：
 
 ```
 dist/
-├── doris-mcp-server-0.3.0-{platform}.tar.gz    ← python/ + src/ + 配置
-└── doris-mcp-client-0.3.0-{platform}.tar.gz    ← python/ + mcp-client/
+└── doris-mcp-server-1.3.1-{platform}.tar.gz    ← python/ + src/ + 配置 + mcp-client/
 ```
 
 ### 12.2 部署
 
 ```bash
 # 1. 解压
-tar xzf doris-mcp-server-0.3.0-linux-x64.tar.gz
+tar xzf doris-mcp-server-1.3.1-linux-x64.tar.gz
 cd doris-mcp-server
 
 # 2. 配置（可选，默认 localhost:9030 即可）
