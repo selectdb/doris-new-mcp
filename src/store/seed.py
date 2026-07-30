@@ -18,6 +18,19 @@ from store.store import _get_conn, set_doris_port as _store_set_port
 
 logger = logging.getLogger("doris_new_mcp.seed")
 
+EXAMPLE_MODEL_FILENAMES = frozenset({
+    "orders.yaml",
+    "users.yaml",
+    "products.yaml",
+    "project.yaml",
+})
+EXAMPLE_DATA_TABLES = frozenset({
+    "orders",
+    "users",
+    "products",
+    "dim_date",
+})
+
 
 def set_doris_port(port: int) -> None:
     _store_set_port(port)
@@ -323,7 +336,7 @@ def seed_example_data() -> bool:
 
 def seed_example_models() -> bool:
     """Upsert example semantic model files into active_store_example.
-    Idempotent: only upserts if the table is empty.
+    Idempotent: inserts only missing built-in files and preserves existing files.
     
     Returns True if seeding was performed, False if already exists.
     """
@@ -346,13 +359,9 @@ def seed_example_models() -> bool:
                 PROPERTIES ('replication_num' = '1')
             """)
 
-            # Check if already seeded
-            cur.execute("SELECT COUNT(*) FROM active_store_example")
-            row = cur.fetchone()
-            if row and row[0] > 0:
-                return False
+            cur.execute("SELECT filename FROM active_store_example")
+            existing = {row[0] for row in cur.fetchall()}
 
-            # Insert example models
             models = [
                 ("orders.yaml",    _ORDERS_YAML),
                 ("users.yaml",     _USERS_YAML),
@@ -360,16 +369,56 @@ def seed_example_models() -> bool:
                 ("project.yaml",   _PROJECT_YAML),
             ]
             for filename, content in models:
+                if filename in existing:
+                    continue
                 cur.execute(
                     "INSERT INTO active_store_example (filename, updated_at, content) VALUES (%s, %s, %s)",
                     (filename, now, content.strip()),
                 )
-            performed = True
-            logger.info(f"Seeded {len(models)} example models into active_store_example")
+                performed = True
+            if performed:
+                logger.info("Seeded missing example models into active_store_example")
 
     finally:
         conn.close()
     return performed
+
+
+def is_example_deployed() -> bool:
+    """Return whether all built-in example models and data tables exist."""
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SHOW TABLES FROM system_mcp LIKE 'active_store_example'")
+                if not cur.fetchone():
+                    return False
+                cur.execute("SELECT filename FROM system_mcp.active_store_example")
+                model_files = {row[0] for row in cur.fetchall()}
+                if not EXAMPLE_MODEL_FILENAMES.issubset(model_files):
+                    return False
+
+                cur.execute("SHOW TABLES FROM dw")
+                data_tables = {row[0] for row in cur.fetchall()}
+                return EXAMPLE_DATA_TABLES.issubset(data_tables)
+            except Exception:
+                return False
+    finally:
+        conn.close()
+
+
+def delete_example() -> None:
+    """Delete the built-in example semantic files and sample data tables."""
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS system_mcp.staging_store_example")
+            cur.execute("DROP TABLE IF EXISTS system_mcp.active_store_example")
+            for table in sorted(EXAMPLE_DATA_TABLES):
+                cur.execute(f"DROP TABLE IF EXISTS dw.{table}")
+    finally:
+        conn.close()
+    logger.info("Deleted example semantic files and sample data tables")
 
 
 def seed_all() -> bool:

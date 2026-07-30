@@ -86,7 +86,47 @@ def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | 
     return session_id, parsed_ip.compressed
 
 
-def create_server(config_dir: str | None = None, env_file: str | None = None) -> FastMCP:
+def get_machine_ip() -> str:
+    """Return the IPv4 address selected by the UDP route to a public endpoint."""
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+def resolve_machine_ip(configured_private_ip: str | None) -> str:
+    """Resolve this node's RFC-1918 IPv4, preferring an explicit configuration."""
+    if configured_private_ip is None:
+        candidate = ""
+    elif isinstance(configured_private_ip, str):
+        candidate = configured_private_ip.strip()
+    else:
+        raise ValueError("Configured private IP must be a string or null")
+
+    source = "Configured private IP"
+    if not candidate:
+        candidate = get_machine_ip()
+        source = "Automatically detected machine IP"
+
+    try:
+        parsed_ip = ipaddress.ip_address(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}") from exc
+    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}")
+    return parsed_ip.compressed
+
+
+def create_server(
+    config_dir: str | None = None,
+    env_file: str | None = None,
+    machine_ip: str | None = None,
+    webui_ip: str | None = None,
+) -> FastMCP:
     """Create and configure the MCP server."""
     if config_dir is None:
         config_dir = os.environ.get("DORIS_MCP_CONFIG_DIR", "config")
@@ -104,60 +144,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     _ws_root = _Path(workspace_dir) / "workspaces"
     _ws_root.mkdir(parents=True, exist_ok=True)
 
-    # ── Lazy seed: deferred to first authenticated request ──
-    _seeded = False
-    _seed_lock = asyncio.Lock()
-
-    async def _ensure_seeded(user: str, password: str) -> None:
-        """Seed example workspace + init watcher on first authenticated request.
-
-        Idempotent — runs at most once across all requests.  Uses the
-        caller's credentials so the store layer can connect to Doris.
-        """
-        nonlocal _seeded
-        if _seeded:
-            return
-        async with _seed_lock:
-            if _seeded:
-                return
-            from store.store import set_request_credentials as _set_creds
-            _set_creds(user, password)
-            try:
-                # 1. Seed example data/models if configured
-                if cfg.mcp.seed_example:
-                    from store.seed import seed_all, set_doris_port as seed_set_port
-                    seed_set_port(cc.fe_mysql_port)
-                    performed = seed_all()
-                    if performed:
-                        logger.info("Example workspace seeded (lazy, on first request)")
-                    else:
-                        logger.info("Example workspace already seeded, nothing to do")
-                    # One-time: grant read-only access to all users (idempotent)
-                    try:
-                        import pymysql as _pymysql
-                        _conn = _pymysql.connect(
-                            host="127.0.0.1", port=cc.fe_mysql_port,
-                            user=user, password=password,
-                            charset="utf8mb4", connect_timeout=5,
-                        )
-                        _conn.cursor().execute("GRANT SELECT_PRIV ON *.* TO '%'")
-                        _conn.close()
-                        logger.info("GRANT SELECT_PRIV ON *.* TO '%' — done")
-                    except Exception as _e:
-                        logger.error(
-                            "GRANT SELECT_PRIV ON *.* TO '%%' failed — non-admin "
-                            "users will get permission errors on query: %s", _e,
-                        )
-                # 2. Discover and init all workspaces
-                multi_watcher.initialize()
-                logger.info(f"Watcher initialized: {multi_watcher.workspace_names()}")
-            except Exception:
-                # Leave _seeded unset so the next request retries.  Marking it
-                # done here would strand the server with an empty workspace
-                # until restart.
-                logger.exception("Lazy init failed — will retry on next request")
-                return
-            _seeded = True
+    # Lazy initialization is deferred until credentials are available.
+    # Automatic example deployment is intentionally Admin-only because it
+    # creates databases/tables and grants privileges.
+    _watcher_initialized = False
+    _example_auto_seed_done = False
+    _example_lock = asyncio.Lock()
 
     # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
@@ -169,6 +161,91 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         app_config=cfg,
     )
     logger.info("Multi-workspace watcher created (lazy init)")
+
+    async def _deploy_example(user: str, password: str) -> bool:
+        """Deploy example data/models with verified Admin credentials."""
+        nonlocal _watcher_initialized, _example_auto_seed_done
+        from store.seed import seed_all, set_doris_port as seed_set_port
+        from store.store import set_request_credentials as _set_creds
+
+        async with _example_lock:
+            _set_creds(user, password)
+            seed_set_port(cc.fe_mysql_port)
+            performed = await asyncio.to_thread(seed_all)
+
+            if not _watcher_initialized:
+                await asyncio.to_thread(multi_watcher.initialize)
+                _watcher_initialized = True
+            elif multi_watcher.has_workspace("example"):
+                await asyncio.to_thread(multi_watcher.force_reload, "example")
+            else:
+                await asyncio.to_thread(
+                    multi_watcher._init_workspace, "example", first_load=True
+                )
+
+            # Allow all authenticated Doris users to query the sample tables.
+            try:
+                import pymysql as _pymysql
+                _conn = await asyncio.to_thread(
+                    _pymysql.connect,
+                    host="127.0.0.1",
+                    port=cc.fe_mysql_port,
+                    user=user,
+                    password=password,
+                    charset="utf8mb4",
+                    connect_timeout=5,
+                )
+                try:
+                    await asyncio.to_thread(
+                        _conn.cursor().execute, "GRANT SELECT_PRIV ON *.* TO '%'"
+                    )
+                finally:
+                    await asyncio.to_thread(_conn.close)
+                logger.info("GRANT SELECT_PRIV ON *.* TO %s — done", "'%'")
+            except Exception as exc:
+                logger.warning("Example deployed, but GRANT SELECT_PRIV failed: %s", exc)
+
+            _example_auto_seed_done = True
+            return performed
+
+    async def _delete_example(password: str) -> None:
+        """Delete example deployment and detach it from the global router."""
+        nonlocal _example_auto_seed_done
+        from store.seed import delete_example
+        from store.store import DorisStore, set_request_credentials as _set_creds
+
+        async with _example_lock:
+            _set_creds("admin", password)
+            await asyncio.to_thread(delete_example)
+            multi_watcher._workspaces.pop("example", None)
+            multi_watcher._staging_validated.discard("example")
+            multi_watcher.router.rebuild(multi_watcher._workspaces)
+            DorisStore._table_cache.pop("example", None)
+
+            import shutil as _shutil
+            await asyncio.to_thread(
+                _shutil.rmtree, _ws_root / "example", ignore_errors=True
+            )
+            # Prevent seed_example=true from immediately undoing a manual delete.
+            # It remains the default again after a process restart.
+            _example_auto_seed_done = True
+
+    async def _ensure_initialized(user: str, password: str) -> None:
+        """Initialize workspaces once authenticated credentials are available."""
+        nonlocal _watcher_initialized
+        from store.store import set_request_credentials as _set_creds
+
+        _set_creds(user, password)
+        try:
+            async with _example_lock:
+                if not _watcher_initialized:
+                    await asyncio.to_thread(multi_watcher.initialize)
+                    _watcher_initialized = True
+                    logger.info(
+                        "Watcher initialized: %s", multi_watcher.workspace_names()
+                    )
+        except Exception:
+            logger.exception("Lazy initialization failed — workspace may be empty")
 
     # Setup logging: write to workspace/logs/server.log + stderr
     import logging as _logging
@@ -243,7 +320,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         return ok
 
     auth_provider = CredentialVerifier(_credential_cache, _async_verify_credentials,
-                                        on_authenticated=_ensure_seeded)
+                                        on_authenticated=_ensure_initialized)
     logger.info("Auth: CredentialVerifier registered (username:password, 10-min cache, lazy seed)")
 
     # Helper: get store for a workspace (defaults to "example")
@@ -320,16 +397,12 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    def _get_machine_ip() -> str:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        finally:
-            s.close()
-
-    _MACHINE_IP = _get_machine_ip()
+    # Machine IP for local Doris connections — always the real local address.
+    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip("")
+    # Web UI IP written into session cookies.  When ``privateIp`` is configured
+    # this points browsers at the designated node; otherwise it matches the
+    # local machine address (cookie-affinity mode).
+    _WEBUI_IP = webui_ip if webui_ip is not None else _MACHINE_IP
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql
@@ -372,7 +445,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(client_id, session.get("doris_password", ""))
-                await _ensure_seeded(client_id, session.get("doris_password", ""))
+                await _ensure_initialized(client_id, session.get("doris_password", ""))
                 return client_id, is_admin, None
             del _webui_sessions[session_id]
 
@@ -391,7 +464,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(username, password)
-                await _ensure_seeded(username, password)
+                await _ensure_initialized(username, password)
                 return username, is_admin, None
             return None, False, JSONResponse(
                 {"success": False, "error": {"code": "UNAUTHORIZED", "message": "Invalid credentials"}},
@@ -406,6 +479,60 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     async def _check_admin_access(request: Request) -> tuple[str | None, Response | None]:
         client_id, _, err = await _check_semantic_access(request, require_admin=True)
         return client_id, err
+
+    def _check_webui_admin_cookie(
+        request: Request,
+    ) -> tuple[dict | None, Response | None]:
+        """Authorize the example switch using only the WebUI session cookie."""
+        session_cookie = _decode_webui_session_cookie(
+            request.cookies.get(_WEBUI_SESSION_COOKIE)
+        )
+        if session_cookie:
+            session_id, server_ip = session_cookie
+            session = _webui_sessions.get(session_id)
+        else:
+            session_id, server_ip, session = None, None, None
+        if session and session.get("server_ip") != server_ip:
+            session = None
+        if session is None:
+            return None, _JSONResponse(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "UNAUTHORIZED",
+                        "message": "A valid Admin WebUI session is required.",
+                    },
+                },
+                status_code=401,
+            )
+        if time.time() - session["created_at"] >= _SESSION_TTL:
+            if session_id:
+                _webui_sessions.pop(session_id, None)
+            return None, _JSONResponse(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "UNAUTHORIZED",
+                        "message": "Admin WebUI session has expired.",
+                    },
+                },
+                status_code=401,
+            )
+        if session.get("doris_user") != "admin" or not session.get("is_admin"):
+            return None, _JSONResponse(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "PERMISSION_DENIED",
+                        "message": "Only the Admin WebUI account can manage example.",
+                    },
+                },
+                status_code=403,
+            )
+
+        from store.store import set_request_credentials
+        set_request_credentials("admin", session.get("doris_password", ""))
+        return session, None
 
     # Load query guide from package resource
     _query_guide = ""
@@ -744,6 +871,74 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
             return _JSONResponse({"success": False, "error": {"code": "RELOAD_FAILED", "message": msg}}, status_code=500)
         return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
 
+    @mcp.custom_route("/mcp/web/example/deployment", methods=["POST"])
+    async def api_example_deployment(request: Request) -> Response:
+        """Deploy/delete example using the verified Admin WebUI session."""
+        session, err = _check_webui_admin_cookie(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        deploy = body.get("deploy")
+        if not isinstance(deploy, bool):
+            return _JSONResponse(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "BAD_REQUEST",
+                        "message": "deploy must be true or false.",
+                    },
+                },
+                status_code=400,
+            )
+
+        password = session.get("doris_password", "") if session else ""
+        try:
+            if deploy:
+                await _deploy_example("admin", password)
+                message = "Example files and sample database deployed."
+            else:
+                await _delete_example(password)
+                message = "Example files and sample database deleted."
+        except Exception as exc:
+            logger.exception("Example deployment switch failed")
+            return _JSONResponse(
+                {
+                    "success": False,
+                    "error": {
+                        "code": "EXAMPLE_DEPLOYMENT_FAILED",
+                        "message": str(exc),
+                    },
+                },
+                status_code=500,
+            )
+
+        from store.seed import is_example_deployed
+        deployed = await asyncio.to_thread(is_example_deployed)
+        log_tool_call(
+            "example_deployment",
+            client_id="admin",
+            params={"deploy": deploy},
+            success=(deployed == deploy),
+            duration_ms=0,
+        )
+        return _JSONResponse(
+            {
+                "success": deployed == deploy,
+                "data": {
+                    "deployed": deployed,
+                    "message": message,
+                    "redirect": (
+                        "/mcp/web/models?workspace=example"
+                        if deployed
+                        else "/mcp/web"
+                    ),
+                },
+            }
+        )
+
     @mcp.custom_route("/mcp/web/workspace/create", methods=["POST"])
     async def api_workspace_create(request: Request) -> Response:
         """Create a new workspace by creating storage tables."""
@@ -960,15 +1155,26 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
         # Create session (any authenticated Doris user can log in)
         session_id = _secrets.token_urlsafe(32)
-        session_cookie_value = _encode_webui_session_cookie(session_id, _MACHINE_IP)
+        session_cookie_value = _encode_webui_session_cookie(session_id, _WEBUI_IP)
         _webui_sessions[session_id] = {
             "doris_user": user,
             "doris_password": password,
-            "server_ip": _MACHINE_IP,
+            "server_ip": _WEBUI_IP,
             "created_at": time.time(),
             "is_admin": is_admin,
         }
         logger.info(f"WebUI login: user='{user}', session={session_id[:8]}...")
+
+        # seed_example is the startup default for the same WebUI switch.
+        # Wait for a verified Admin login so its in-memory password can be used.
+        if is_admin and cfg.mcp.seed_example and not _example_auto_seed_done:
+            try:
+                await _deploy_example(user, password)
+                logger.info("Example deployment checked after Admin WebUI login")
+            except Exception:
+                logger.exception(
+                    "Automatic example deployment failed; Admin can retry in WebUI"
+                )
 
         resp = _R("/mcp/web", status_code=303)
         resp.set_cookie(
@@ -1098,9 +1304,22 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
             status_text = "no models"
             status_color = "color:var(--muted);"
         if is_admin:
+            from store.seed import is_example_deployed
+            example_deployed = await asyncio.to_thread(is_example_deployed)
+            if example_deployed:
+                example_action_html = (
+                    '<button class="btn btn-sm btn-danger" '
+                    'onclick="exampleAction(false)">🗑 Delete example</button>'
+                )
+            else:
+                example_action_html = (
+                    '<button class="btn btn-sm btn-success" '
+                    'onclick="exampleAction(true)">🧪 Deploy example</button>'
+                )
             ws_actions_html = (
                 '<span class="btn btn-sm" style="' + status_color + ';cursor:default;">' + status_text + '</span> '
                 '<button class="btn btn-sm" onclick="wsAction(\'/mcp/web/semantic/reload\',\'Reloading\')">⟳ Reload</button>'
+                + example_action_html
             )
         else:
             ws_actions_html = '<span class="btn btn-sm" style="' + status_color + ';cursor:default;">' + status_text + '</span>'
@@ -1188,6 +1407,27 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 function switchWorkspace(sel) { var u=new URL(window.location);u.searchParams.set("workspace",sel.value);window.location=u.toString(); }
 function createWorkspace() { var n=prompt("New workspace name (letters, numbers, underscores only):"); if(n) { fetch("/mcp/web/workspace/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})}).then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.error?d.error.message:"Failed")}); } }
 function deleteWorkspace(n) { if(confirm("Delete workspace '"+n+"' and all its models?")) { fetch("/mcp/web/workspace/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({workspace:n})}).then(r=>r.json()).then(d=>{if(d.success)location.href="/mcp/web";else alert(d.error?d.error.message:"Failed")}); } }
+function exampleAction(deploy) {
+  if (!deploy && !confirm("Delete example models and all four sample data tables?")) return;
+  var el=document.getElementById("ws-result");
+  var label=deploy?"Deploying example":"Deleting example";
+  if(el){el.textContent="⏳ "+label+"...";el.style.display="block";}
+  fetch("/mcp/web/example/deployment",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({deploy:deploy})
+  }).then(r=>r.json()).then(d=>{
+    if(!d.success){
+      var msg=d.error?d.error.message:"Failed";
+      if(el){el.textContent="❌ "+msg;el.style.background="#fce8e6";}else alert(msg);
+      return;
+    }
+    if(el){el.textContent="✅ "+d.data.message;el.style.background="#e6f4ea";}
+    setTimeout(function(){location.href=d.data.redirect||"/mcp/web";},800);
+  }).catch(e=>{
+    if(el){el.textContent="❌ "+e;el.style.background="#fce8e6";}else alert(e);
+  });
+}
 function wsAction(url,label) {
   var ws=new URLSearchParams(window.location.search).get("workspace")||"example";
   var el=document.getElementById("ws-result");

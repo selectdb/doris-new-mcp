@@ -58,7 +58,7 @@ main()
   ├─ 解析参数 (--config-dir, --env-file)
   ├─ AppConfig.load(mcp-server.toml)   ← TOML 配置文件，支持 ${VAR} 环境变量插值
   └─ create_server()
-       ├─ seed_example_data()          ← 若 seed_example=true（默认开启）
+       ├─ Admin 登录后部署 example     ← 默认关闭；seed_example=true 时自动
        ├─ MultiWorkspaceWatcher.start() ← 后台轮询线程（60s 间隔）
        ├─ ConnectionPool (admin)       ← aiomysql 连接池，min=0, max=10
        ├─ CredentialVerifier           ← Bearer token → Doris 凭据验证
@@ -85,7 +85,7 @@ mcp_name = "doris-new-mcp"      # MCP 服务名称
 mcp_host = "0.0.0.0"            # 监听地址
 mcp_port = 3000                 # HTTP 端口
 fe_port = 9030                  # Doris FE MySQL 端口（同机 127.0.0.1）
-seed_example = true             # 首次启动自动创建示例工作区
+seed_example = false            # 默认不部署；Admin 可在 WebUI 手动部署
 
 [logging]
 level = "info"                  # debug|info|warning|error
@@ -465,7 +465,8 @@ doris-mcp-client semantic status
 
 ## 10. 示例工作区
 
-首次启动时（若 `seed_example=true`），系统自动创建：
+默认不部署 example。Admin 可通过 Reload 右侧的专属按钮手动部署或删除；
+若显式设置 `seed_example=true`，Admin 首次登录 WebUI 时自动部署：
 
 | 表 | 行数 | 说明 |
 |----|------|------|
