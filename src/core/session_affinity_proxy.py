@@ -113,15 +113,12 @@ class SessionAffinityProxy:
         cookie_name: str = "doris_mcp_session",
         client: httpx.AsyncClient | None = None,
         timeout: httpx.TimeoutTypes | None = None,
-        force_target_ip: str | None = None,
     ) -> None:
         self.app = app
         self.decoder = decoder
         self.local_ip = local_ip
         self.target_port = target_port
         self.cookie_name = cookie_name
-        self.force_target_ip = force_target_ip
-        # An injected client is owned by its caller, including its cookie state.
         self._client = client
         self._owns_client = client is None
         self._timeout = _DEFAULT_TIMEOUT if timeout is None else timeout
@@ -147,24 +144,12 @@ class SessionAffinityProxy:
             await self.app(scope, receive, send)
             return
 
-        headers = scope.get("headers", [])
-
-        # ── force-target mode: every web request goes to the designated node ──
-        if self.force_target_ip is not None:
-            if self.force_target_ip == self.local_ip:
-                await self.app(_without_internal_header(scope), receive, send)
-                return
-            if any(name.lower() == _INTERNAL_HOP_HEADER for name, _ in headers):
-                await self._send_error(send, 502, b"Bad Gateway")
-                return
-            await self._proxy(scope, receive, send, self.force_target_ip)
-            return
-
-        # ── cookie-affinity mode ──
         # Login must stay local even if a stale cookie identifies another node.
         if path == "/mcp/web/login":
             await self.app(_without_internal_header(scope), receive, send)
             return
+
+        headers = scope.get("headers", [])
         cookie = _cookie_value(headers, self.cookie_name)
         try:
             decoded = self.decoder(cookie) if cookie is not None else None
@@ -332,50 +317,25 @@ class SessionAffinityProxy:
     async def _send_relogin(
         self, send: Callable[[dict[str, Any]], Awaitable[None]]
     ) -> None:
-        """Clear the session cookie and guide the user back to login.
+        """Clear the session cookie and redirect the browser to the login page.
 
-        In cookie-affinity mode a 303 redirect to ``/mcp/web/login`` is safe
-        because login is always handled locally.  In force-target mode the
-        same redirect would be proxied straight back to the unreachable
-        node, creating a loop.  There we clear the cookie and serve a static
-        page so the user can try again when the designated node recovers.
+        Login is always handled locally, so the redirect is safe regardless
+        of which node receives it.
         """
         try:
-            if self.force_target_ip is not None:
-                body = (
-                    b"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                    b"<title>Session lost</title></head><body>"
-                    b"<h1>Session lost</h1>"
-                    b"<p>The server holding your session is unreachable. "
-                    b"Please try again in a moment, or contact your "
-                    b"administrator.</p></body></html>"
-                )
-                await self._send_downstream(send, {
-                    "type": "http.response.start",
-                    "status": 503,
-                    "headers": [
-                        (b"content-type", b"text/html; charset=utf-8"),
-                        (b"content-length", str(len(body)).encode()),
-                        (b"set-cookie", self.cookie_name.encode("ascii") + b"=; Max-Age=0; Path=/mcp/web; HttpOnly; SameSite=Lax"),
-                    ],
-                })
-                await self._send_downstream(
-                    send, {"type": "http.response.body", "body": body, "more_body": False}
-                )
-            else:
-                await self._send_downstream(send, {
-                    "type": "http.response.start",
-                    "status": 303,
-                    "headers": [
-                        (b"location", b"/mcp/web/login"),
-                        (b"set-cookie", self.cookie_name.encode("ascii") + b"=; Max-Age=0; Path=/mcp/web; HttpOnly; SameSite=Lax"),
-                        (b"content-type", b"text/plain; charset=utf-8"),
-                        (b"content-length", b"0"),
-                    ],
-                })
-                await self._send_downstream(
-                    send, {"type": "http.response.body", "body": b"", "more_body": False}
-                )
+            await self._send_downstream(send, {
+                "type": "http.response.start",
+                "status": 303,
+                "headers": [
+                    (b"location", b"/mcp/web/login"),
+                    (b"set-cookie", self.cookie_name.encode("ascii") + b"=; Max-Age=0; Path=/mcp/web; HttpOnly; SameSite=Lax"),
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", b"0"),
+                ],
+            })
+            await self._send_downstream(
+                send, {"type": "http.response.body", "body": b"", "more_body": False}
+            )
         except _ClientDisconnected:
             return
 

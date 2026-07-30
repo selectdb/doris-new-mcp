@@ -125,6 +125,7 @@ def create_server(
     config_dir: str | None = None,
     env_file: str | None = None,
     machine_ip: str | None = None,
+    webui_ip: str | None = None,
 ) -> FastMCP:
     """Create and configure the MCP server."""
     if config_dir is None:
@@ -359,11 +360,14 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    # This is this node's address for local Doris connections and session cookies,
-    # not a fixed remote target for request routing.
+    # Machine IP for local Doris connections (always the real local address).
     _MACHINE_IP = resolve_machine_ip(
         machine_ip if machine_ip is not None else cfg.mcp.private_ip
     )
+    # Web UI IP written into session cookies.  When ``privateIp`` is configured
+    # this points browsers at the designated node; otherwise it matches the
+    # local machine address (cookie-affinity mode).
+    _WEBUI_IP = resolve_machine_ip(webui_ip) if webui_ip is not None else _MACHINE_IP
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql
@@ -994,11 +998,11 @@ def create_server(
 
         # Create session (any authenticated Doris user can log in)
         session_id = _secrets.token_urlsafe(32)
-        session_cookie_value = _encode_webui_session_cookie(session_id, _MACHINE_IP)
+        session_cookie_value = _encode_webui_session_cookie(session_id, _WEBUI_IP)
         _webui_sessions[session_id] = {
             "doris_user": user,
             "doris_password": password,
-            "server_ip": _MACHINE_IP,
+            "server_ip": _WEBUI_IP,
             "created_at": time.time(),
             "is_admin": is_admin,
         }

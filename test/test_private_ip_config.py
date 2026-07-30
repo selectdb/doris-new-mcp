@@ -93,7 +93,7 @@ class MainPrivateIpFlowTests(unittest.TestCase):
 
         resolve.assert_called_once_with(cfg.mcp.private_ip)
         create.assert_called_once_with(
-            config_dir="/offline-config", env_file=None, machine_ip="10.20.30.40"
+            config_dir="/offline-config", env_file=None, machine_ip="10.20.30.40", webui_ip="10.20.30.40"
         )
         mcp.run.assert_called_once()
 
