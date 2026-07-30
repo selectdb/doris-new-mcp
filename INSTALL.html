@@ -67,7 +67,7 @@ nohup bash start-mcp-server.sh > /tmp/doris-mcp.log 2>&1 &</pre>
 
 <h2>首次启动</h2>
 <div class="card">
-  <p>自动创建 <code>example</code> 工作区，含：</p>
+  <p>Admin 首次登录 WebUI 后自动创建 <code>example</code> 工作区，含：</p>
   <table>
     <tr><td>dw.orders</td><td>12 条示例订单</td></tr>
     <tr><td>dw.users</td><td>5 条示例用户</td></tr>
@@ -75,7 +75,7 @@ nohup bash start-mcp-server.sh > /tmp/doris-mcp.log 2>&1 &</pre>
     <tr><td>dw.dim_date</td><td>365 天日期维度</td></tr>
   </table>
   <p>5 个示例指标：total_amount、order_count、avg_amount、unique_users、user_count</p>
-  <p>关掉种子：<code>seed_example = false</code></p>
+  <p>关掉自动部署：<code>seed_example = false</code>。仍可使用 Reload 右侧的 Admin 专属按钮手动部署。</p>
 </div>
 
 <h2>验证</h2>
