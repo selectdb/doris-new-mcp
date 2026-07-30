@@ -337,9 +337,15 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
         JSONResponse = _JSONResponse  # alias
 
         # 1. Session cookie
-        session_id = request.cookies.get("doris_mcp_session")
-        if session_id and session_id in _webui_sessions:
-            session = _webui_sessions[session_id]
+        session_cookie = _decode_webui_session_cookie(
+            request.cookies.get(_WEBUI_SESSION_COOKIE)
+        )
+        if session_cookie:
+            session_id, server_ip = session_cookie
+            session = _webui_sessions.get(session_id)
+        else:
+            session_id, server_ip, session = None, None, None
+        if session and session["server_ip"] == server_ip:
             if time.time() - session["created_at"] < _SESSION_TTL:
                 client_id = session["doris_user"]
                 is_admin = (client_id == "admin")
@@ -903,10 +909,19 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     async def semantic_webui_login_page(request: Request) -> Response:
         from starlette.responses import HTMLResponse as _HTML
         # If already logged in, redirect to home
-        session_id = request.cookies.get("doris_mcp_session")
-        if session_id and session_id in _webui_sessions:
-            from starlette.responses import RedirectResponse as _R
-            return _R("/mcp/web", status_code=303)
+        session_cookie = _decode_webui_session_cookie(
+            request.cookies.get(_WEBUI_SESSION_COOKIE)
+        )
+        if session_cookie:
+            session_id, server_ip = session_cookie
+            session = _webui_sessions.get(session_id)
+            if (
+                session
+                and session["server_ip"] == server_ip
+                and time.time() - session["created_at"] < _SESSION_TTL
+            ):
+                from starlette.responses import RedirectResponse as _R
+                return _R("/mcp/web", status_code=303)
         return _HTML(_render_login())
 
     @mcp.custom_route("/mcp/web/login", methods=["POST"])
@@ -928,9 +943,11 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
         # Create session (any authenticated Doris user can log in)
         session_id = _secrets.token_urlsafe(32)
+        session_cookie_value = _encode_webui_session_cookie(session_id, _MACHINE_IP)
         _webui_sessions[session_id] = {
             "doris_user": user,
             "doris_password": password,
+            "server_ip": _MACHINE_IP,
             "created_at": time.time(),
             "is_admin": is_admin,
         }
@@ -938,7 +955,7 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
 
         resp = _R("/mcp/web", status_code=303)
         resp.set_cookie(
-            "doris_mcp_session", session_id,
+            _WEBUI_SESSION_COOKIE, session_cookie_value,
             httponly=True, samesite="lax", max_age=_SESSION_TTL,
             path="/mcp/web",
         )
@@ -947,11 +964,16 @@ def create_server(config_dir: str | None = None, env_file: str | None = None) ->
     @mcp.custom_route("/mcp/web/logout", methods=["GET"])
     async def semantic_webui_logout(request: Request) -> Response:
         from starlette.responses import RedirectResponse as _R
-        session_id = request.cookies.get("doris_mcp_session")
-        if session_id:
-            _webui_sessions.pop(session_id, None)
+        session_cookie = _decode_webui_session_cookie(
+            request.cookies.get(_WEBUI_SESSION_COOKIE)
+        )
+        if session_cookie:
+            session_id, server_ip = session_cookie
+            session = _webui_sessions.get(session_id)
+            if session and session["server_ip"] == server_ip:
+                _webui_sessions.pop(session_id, None)
         resp = _R("/mcp/web/login", status_code=303)
-        resp.delete_cookie("doris_mcp_session", path="/mcp/web")
+        resp.delete_cookie(_WEBUI_SESSION_COOKIE, path="/mcp/web")
         return resp
 
     # -- Semantic model pages --
