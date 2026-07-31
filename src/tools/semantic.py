@@ -8,6 +8,7 @@ from typing import Any
 from core.connection import ConnectionPool
 from core.pagination import paginate
 from core.response import ErrorCode, error_response, success_response
+from core.sql_validator import validate_readonly
 from store.compiler import MetricFlowCompiler
 from store.manifest import SemanticManifest
 
@@ -74,12 +75,19 @@ async def query_metric(
         if not sql:
             return error_response(ErrorCode.INTERNAL_ERROR, "MetricFlow returned empty SQL")
 
-        # Step 2: Execute via our connection pool
+        # Step 2: Validate read-only — where/having are user-controlled and can
+        # inject arbitrary SQL into the generated statement, so enforce the same
+        # read-only policy as execute_query before executing.
+        is_valid, err_msg = validate_readonly(sql)
+        if not is_valid:
+            return error_response(ErrorCode.INVALID_SQL, err_msg)
+
+        # Step 3: Execute via our connection pool
         start = time.monotonic()
         rows, columns = await pool.execute(sql, database=database, max_rows=max_rows)
         duration_ms = (time.monotonic() - start) * 1000
 
-        # Step 3: Post-process — replace null with 0 for metric columns
+        # Step 4: Post-process — replace null with 0 for metric columns
         # MetricFlow FULL OUTER JOIN can produce null for count/sum metrics
         metric_cols = set(m.replace("-", "_") for m in metrics)
         for row in rows:

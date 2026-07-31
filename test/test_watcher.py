@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 import unittest
@@ -22,6 +23,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 
 # ── Minimal stubs to avoid importing the full server chain ──

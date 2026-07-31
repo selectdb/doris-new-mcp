@@ -31,6 +31,7 @@ from core.audit import init_audit_log, log_tool_call
 from core.connection import ConnectionPool
 from core.pool_manager import PoolManager
 from core.response import ErrorCode, error_response, success_response
+from core.sensitive_mask import mask_sensitive
 from tools.discovery import (
     describe_table as _describe_table,
     list_databases as _list_databases,
@@ -61,12 +62,12 @@ def _is_rfc1918_ipv4(ip: ipaddress.IPv4Address) -> bool:
 
 
 def _encode_webui_session_cookie(session_id: str, server_ip: str) -> str:
-    """Encode a Web UI session ID with the issuing server's private IPv4."""
+    """Encode a Web UI session ID with the issuing server's IPv4 address."""
     if not session_id or "." in session_id:
         raise ValueError("Session ID must be non-empty and cannot contain '.'")
     parsed_ip = ipaddress.ip_address(server_ip)
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
-        raise ValueError("Web UI session cookie requires an RFC-1918 private IPv4 server IP")
+    if not isinstance(parsed_ip, ipaddress.IPv4Address):
+        raise ValueError("Web UI session cookie requires an IPv4 server IP")
     return f"{session_id}.{parsed_ip.compressed}"
 
 
@@ -81,25 +82,36 @@ def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | 
         parsed_ip = ipaddress.ip_address(server_ip)
     except ValueError:
         return None
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
+    if not isinstance(parsed_ip, ipaddress.IPv4Address):
         return None
     return session_id, parsed_ip.compressed
 
 
-def get_machine_ip() -> str:
-    """Return the IPv4 address selected by the UDP route to a public endpoint."""
+def get_machine_ip() -> str | None:
+    """Best-effort local IPv4 detection via the UDP route to a public endpoint.
+
+    Returns ``None`` instead of raising when the probe fails (offline host,
+    no default route, IPv6-only stack) so startup can degrade gracefully.
+    """
     import socket
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
         return sock.getsockname()[0]
+    except OSError:
+        return None
     finally:
         sock.close()
 
 
 def resolve_machine_ip(configured_private_ip: str | None) -> str:
-    """Resolve this node's RFC-1918 IPv4, preferring an explicit configuration."""
+    """Resolve this node's IPv4 identity for session affinity.
+
+    Preference order: configured ``privateIp`` → UDP auto-detection →
+    ``127.0.0.1`` fallback.  Non-RFC-1918 addresses (e.g. public IPs) are
+    accepted with a warning instead of being rejected.
+    """
     if configured_private_ip is None:
         candidate = ""
     elif isinstance(configured_private_ip, str):
@@ -107,17 +119,44 @@ def resolve_machine_ip(configured_private_ip: str | None) -> str:
     else:
         raise ValueError("Configured private IP must be a string or null")
 
-    source = "Configured private IP"
-    if not candidate:
-        candidate = get_machine_ip()
-        source = "Automatically detected machine IP"
+    if candidate:
+        # A configured value is operator input — fail fast on garbage.
+        source = "Configured private IP"
+        try:
+            parsed_ip = ipaddress.ip_address(candidate)
+        except ValueError as exc:
+            raise ValueError(f"{source} must be an IPv4 address: {candidate!r}") from exc
+        if not isinstance(parsed_ip, ipaddress.IPv4Address):
+            raise ValueError(f"{source} must be an IPv4 address: {candidate!r}")
+    else:
+        # Auto-detection is best-effort: an unusable result must not abort
+        # startup.  127.0.0.1 is harmless for single-node deployments (the
+        # affinity cookie always points back at this node); multi-node
+        # deployments must configure ``privateIp`` so nodes can be told apart.
+        parsed_ip = None
+        detected = get_machine_ip()
+        if detected:
+            try:
+                probed = ipaddress.ip_address(detected)
+                if isinstance(probed, ipaddress.IPv4Address):
+                    parsed_ip = probed
+            except ValueError:
+                pass
+        if parsed_ip is None:
+            logger.warning(
+                "Could not auto-detect the machine IP (offline host, no default "
+                "route, or IPv6-only stack); falling back to 127.0.0.1. This is "
+                "fine for single-node deployments; multi-node deployments must "
+                "set server.privateIp in mcp-server.toml."
+            )
+            return "127.0.0.1"
 
-    try:
-        parsed_ip = ipaddress.ip_address(candidate)
-    except ValueError as exc:
-        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}") from exc
-    if not isinstance(parsed_ip, ipaddress.IPv4Address) or not _is_rfc1918_ipv4(parsed_ip):
-        raise ValueError(f"{source} must be an RFC-1918 private IPv4 address: {candidate!r}")
+    if not _is_rfc1918_ipv4(parsed_ip):
+        logger.warning(
+            "Node IP %s is not an RFC-1918 private address; using it anyway "
+            "for session-affinity node identity.",
+            parsed_ip.compressed,
+        )
     return parsed_ip.compressed
 
 
@@ -126,13 +165,16 @@ def create_server(
     env_file: str | None = None,
     machine_ip: str | None = None,
     webui_ip: str | None = None,
+    config: "AppConfig | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server."""
     if config_dir is None:
         config_dir = os.environ.get("DORIS_MCP_CONFIG_DIR", "config")
 
     config_path = os.path.abspath(config_dir)
-    cfg = AppConfig(config_path, env_file=env_file)
+    # Reuse a pre-built config when the caller (main.py) already parsed it,
+    # so the TOML/dotenv files are read exactly once per process.
+    cfg = config if config is not None else AppConfig(config_path, env_file=env_file)
     cc = cfg.cluster
 
     # Workspace directory
@@ -208,14 +250,14 @@ def create_server(
             _example_auto_seed_done = True
             return performed
 
-    async def _delete_example(password: str) -> None:
+    async def _delete_example(user: str, password: str) -> None:
         """Delete example deployment and detach it from the global router."""
         nonlocal _example_auto_seed_done
         from store.seed import delete_example
         from store.store import DorisStore, set_request_credentials as _set_creds
 
         async with _example_lock:
-            _set_creds("admin", password)
+            _set_creds(user, password)
             await asyncio.to_thread(delete_example)
             multi_watcher._workspaces.pop("example", None)
             multi_watcher._staging_validated.discard("example")
@@ -352,6 +394,64 @@ def create_server(
     _VALID_WORKSPACE_NAME = _re.compile(r'^[a-zA-Z][a-zA-Z0-9_]*$')
     _webui_sessions: dict[str, dict] = {}
     _SESSION_TTL = 24 * 3600  # 24 hours
+    _WEBUI_SESSION_MAX = 1000  # hard cap on in-memory sessions
+
+    def _prune_webui_sessions() -> None:
+        """Drop expired sessions, then evict the oldest while over capacity.
+
+        Called on login (the only write path) so the dict cannot grow
+        without bound and expired entries do not linger until revisited.
+        """
+        now = time.time()
+        for sid in [s for s, v in _webui_sessions.items()
+                    if now - v["created_at"] >= _SESSION_TTL]:
+            _webui_sessions.pop(sid, None)
+        while len(_webui_sessions) >= _WEBUI_SESSION_MAX:
+            oldest = min(_webui_sessions,
+                         key=lambda s: _webui_sessions[s]["created_at"])
+            _webui_sessions.pop(oldest, None)
+
+    # Brute-force guard: consecutive login failures per username.  After
+    # _LOGIN_MAX_FAILURES failures the account is locked for
+    # _LOGIN_LOCKOUT_SECONDS; a successful login clears the counter.
+    # In-memory only — not shared across processes, so multi-instance
+    # deployments still need an external rate limiter.
+    _LOGIN_MAX_FAILURES = 5
+    _LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+    _LOGIN_FAILURES_MAX = 10000  # cap on tracked usernames
+    _login_failures: dict[str, tuple[int, float]] = {}  # user -> (count, locked_until)
+
+    def _login_locked(user: str) -> bool:
+        entry = _login_failures.get(user)
+        if not entry:
+            return False
+        count, locked_until = entry
+        if count < _LOGIN_MAX_FAILURES:
+            return False
+        if time.time() < locked_until:
+            return True
+        _login_failures.pop(user, None)  # lock expired
+        return False
+
+    def _record_login_failure(user: str) -> None:
+        count, _ = _login_failures.get(user, (0, 0.0))
+        count += 1
+        locked_until = (
+            time.time() + _LOGIN_LOCKOUT_SECONDS
+            if count >= _LOGIN_MAX_FAILURES else 0.0
+        )
+        _login_failures[user] = (count, locked_until)
+        if len(_login_failures) > _LOGIN_FAILURES_MAX:
+            # Bound memory: drop entries with no active lock first.
+            now = time.time()
+            for u in [u for u, (c, t) in _login_failures.items()
+                      if c < _LOGIN_MAX_FAILURES or now >= t]:
+                _login_failures.pop(u, None)
+            if len(_login_failures) > _LOGIN_FAILURES_MAX:
+                _login_failures.clear()
+
+    def _record_login_success(user: str) -> None:
+        _login_failures.pop(user, None)
 
     async def _get_per_user_pool() -> ConnectionPool:
         """Return a per-user connection pool from the request Bearer token.
@@ -397,15 +497,19 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    # Machine IP for local Doris connections — always the real local address.
-    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip("")
-    # Web UI IP written into session cookies.  When ``privateIp`` is configured
-    # this points browsers at the designated node; otherwise it matches the
-    # local machine address (cookie-affinity mode).
+    # Node identity: used for local Doris connections and as the
+    # session-affinity local IP.  Prefers the caller-provided value, then
+    # the configured ``privateIp``, then auto-detection (with fallback).
+    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip(cfg.mcp.private_ip)
+    # Web UI IP written into session cookies; defaults to the node identity
+    # (cookie-affinity mode).
     _WEBUI_IP = webui_ip if webui_ip is not None else _MACHINE_IP
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql
+        if _login_locked(user):
+            # Same result as a wrong password — do not reveal lock state.
+            return False, False
         try:
             conn = pymysql.connect(
                 host=_MACHINE_IP, port=cc.fe_mysql_port,
@@ -413,8 +517,10 @@ def create_server(
                 charset="utf8mb4", connect_timeout=5,
             )
             conn.close()
-            return True, (user == "admin")
+            _record_login_success(user)
+            return True, (user in cfg.mcp.admin_users)
         except Exception:
+            _record_login_failure(user)
             return False, False
 
     def _webui_redirect_login():
@@ -438,7 +544,7 @@ def create_server(
         if session and session["server_ip"] == server_ip:
             if time.time() - session["created_at"] < _SESSION_TTL:
                 client_id = session["doris_user"]
-                is_admin = (client_id == "admin")
+                is_admin = (client_id in cfg.mcp.admin_users)
                 if require_admin and not is_admin:
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
@@ -518,7 +624,8 @@ def create_server(
                 },
                 status_code=401,
             )
-        if session.get("doris_user") != "admin" or not session.get("is_admin"):
+        # is_admin was resolved against cfg.mcp.admin_users at login time.
+        if not session.get("is_admin"):
             return None, _JSONResponse(
                 {
                     "success": False,
@@ -531,7 +638,7 @@ def create_server(
             )
 
         from store.store import set_request_credentials
-        set_request_credentials("admin", session.get("doris_password", ""))
+        set_request_credentials(session.get("doris_user", ""), session.get("doris_password", ""))
         return session, None
 
     # Load query guide from package resource
@@ -639,6 +746,8 @@ def create_server(
         if auth.denied:
             return auth.denied
         start = time.monotonic()
+        if cc.db_whitelist and database not in cc.db_whitelist:
+            return error_response(ErrorCode.PERMISSION_DENIED, f"Database '{database}' not in whitelist")
         pool = await _acquire_pool("describe_table")
         if isinstance(pool, str):
             return pool
@@ -647,7 +756,6 @@ def create_server(
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
         return result
 
-    # Semantic guard state
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False)
     )
@@ -656,6 +764,13 @@ def create_server(
         auth = check_tool_access("execute_query")
         if auth.denied:
             return auth.denied
+
+        # The whitelist is enforced only against the explicit `database`
+        # argument — reliably parsing the target DB out of arbitrary SQL is
+        # not feasible, so fully-qualified cross-database references in SQL
+        # are not caught here. Empty whitelist = no restriction.
+        if database and cc.db_whitelist and database not in cc.db_whitelist:
+            return error_response(ErrorCode.PERMISSION_DENIED, f"Database '{database}' not in whitelist")
 
         pool = await _acquire_pool("execute_query")
         if isinstance(pool, str):
@@ -669,7 +784,7 @@ def create_server(
         parsed = json.loads(result)
         actual_success = parsed.get("success", False)
 
-        log_tool_call("execute_query", client_id=auth.client_id, params={"sql": sql[:200], "database": database},
+        log_tool_call("execute_query", client_id=auth.client_id, params={"sql": mask_sensitive(sql[:200]), "database": database},
                       success=actual_success, duration_ms=duration, metricflow=False)
         return result
 
@@ -894,13 +1009,14 @@ def create_server(
                 status_code=400,
             )
 
+        user = session.get("doris_user", "") if session else ""
         password = session.get("doris_password", "") if session else ""
         try:
             if deploy:
-                await _deploy_example("admin", password)
+                await _deploy_example(user, password)
                 message = "Example files and sample database deployed."
             else:
-                await _delete_example(password)
+                await _delete_example(user, password)
                 message = "Example files and sample database deleted."
         except Exception as exc:
             logger.exception("Example deployment switch failed")
@@ -919,7 +1035,7 @@ def create_server(
         deployed = await asyncio.to_thread(is_example_deployed)
         log_tool_call(
             "example_deployment",
-            client_id="admin",
+            client_id=user or "admin",
             params={"deploy": deploy},
             success=(deployed == deploy),
             duration_ms=0,
@@ -1154,6 +1270,7 @@ def create_server(
             return _HTML(_render_login(f"Authentication failed for user '{user}'. Check your credentials."), status_code=401)
 
         # Create session (any authenticated Doris user can log in)
+        _prune_webui_sessions()
         session_id = _secrets.token_urlsafe(32)
         session_cookie_value = _encode_webui_session_cookie(session_id, _WEBUI_IP)
         _webui_sessions[session_id] = {
@@ -1177,9 +1294,15 @@ def create_server(
                 )
 
         resp = _R("/mcp/web", status_code=303)
+        # Mark the cookie Secure when the request arrived over HTTPS —
+        # directly, or via a TLS-terminating reverse proxy (X-Forwarded-Proto).
+        secure_cookie = (
+            request.url.scheme == "https"
+            or request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+        )
         resp.set_cookie(
             _WEBUI_SESSION_COOKIE, session_cookie_value,
-            httponly=True, samesite="lax", max_age=_SESSION_TTL,
+            httponly=True, samesite="lax", secure=secure_cookie, max_age=_SESSION_TTL,
             path="/mcp/web",
         )
         return resp

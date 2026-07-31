@@ -86,10 +86,3 @@ class VersionTracker:
                     metric_count=self._version.metric_count,
                     last_reload_success=False,
                 )
-
-    def to_external_dict(self) -> dict:
-        """Return the version info for health/tool responses. Only loaded_at."""
-        with self._lock:
-            if self._version:
-                return {"version": self._version.loaded_at}
-            return {"version": None}

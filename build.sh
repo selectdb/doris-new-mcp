@@ -17,7 +17,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_NAME="doris-mcp-server"
-VERSION="${VERSION:-0.3.0}"
+# VERSION 环境变量优先；否则从 pyproject.toml 解析（版本号单一事实源）
+VERSION="${VERSION:-$(grep -m1 '^version' "$SCRIPT_DIR/pyproject.toml" | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')}"
 PYTHON_DIR="$SCRIPT_DIR/python"
 REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
 DIST_DIR="$SCRIPT_DIR/dist"
@@ -149,6 +150,15 @@ _ensure_python() {
         local py_ver
         py_ver=$("$DORIS_MCP_SYSTEM_PYTHON" --version 2>&1)
         _info "Python version: $py_ver"
+
+        # 打包瘦身路径硬编码 lib/python3.10，系统 Python 必须是 3.10.x
+        local py_major_minor
+        py_major_minor=$("$DORIS_MCP_SYSTEM_PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+        if [ "$py_major_minor" != "3.10" ]; then
+            _error "DORIS_MCP_SYSTEM_PYTHON must point to Python 3.10.x (got: $py_ver)"
+            _error "The packaging layout hardcodes lib/python3.10; other versions are not supported"
+            exit 1
+        fi
         
         # Copy real Python files into python/ dir (no symlinks)
         local py_root

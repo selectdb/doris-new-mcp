@@ -127,6 +127,7 @@ def _extract_references(yaml_content: str) -> dict[str, list[str]]:
     - ratio metrics (``numerator``, ``denominator``)
     - conversion metrics (``entity``)
     - foreign entities (``type: foreign``)
+    - dbt-style model references (``model: ref('name')`` or plain name)
     """
     import yaml
 
@@ -145,6 +146,10 @@ def _extract_references(yaml_content: str) -> dict[str, list[str]]:
         sm = doc.get("semantic_model")
         if not isinstance(sm, dict):
             continue
+
+        model_ref = sm.get("model", "")
+        if isinstance(model_ref, str) and model_ref.strip():
+            models.add(_extract_ref_name(model_ref))
 
         for e in sm.get("entities") or []:
             if isinstance(e, dict) and e.get("type") == "foreign":
@@ -191,6 +196,19 @@ def _extract_measure_names_from_expr(expr: str) -> list[str]:
     }
     tokens = re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b", expr)
     return [t for t in tokens if t.lower() not in _SQL_KEYWORDS]
+
+
+def _extract_ref_name(ref: str) -> str:
+    """Extract a model name from a dbt ``ref()`` call or plain string.
+
+    Example: ``"ref('orders')"`` → ``"orders"``, ``"orders"`` → ``"orders"``
+    """
+    import re
+
+    match = re.match(r"""ref\(\s*['"]([^'"]+)['"]\s*\)""", ref.strip())
+    if match:
+        return match.group(1)
+    return ref.strip()
 
 
 # ---------------------------------------------------------------------------
