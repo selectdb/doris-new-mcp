@@ -182,7 +182,7 @@ The build downloads a standalone Python 3.10 and produces a self-contained tarba
 DORIS_MCP_SYSTEM_PYTHON=/opt/miniconda3/bin/python ./build.sh linux-x64
 ```
 
-**CI releases** (`.github/workflows/release.yml`): merging a PR to `main` automatically bumps the latest `0.2.x` tag, builds linux-x64 + linux-arm64 packages, and publishes a GitHub Release. Pushing a tag named `doris-mcp-server-x.y.z` releases that exact version.
+**CI releases** (`.github/workflows/release.yml`): pushing a tag named `doris-mcp-server-x.y.z` builds linux-x64 + linux-arm64 packages and publishes a GitHub Release for that version. A release can also be triggered manually from the Actions page.
 
 ## Running Tests
 

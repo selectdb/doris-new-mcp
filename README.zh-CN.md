@@ -182,7 +182,7 @@ privateIp = "10.0.0.13"   # 所有节点填同一个 IP
 DORIS_MCP_SYSTEM_PYTHON=/opt/miniconda3/bin/python ./build.sh linux-x64
 ```
 
-**CI 自动发版**（`.github/workflows/release.yml`）：PR 合入 main 后自动在最新 `0.2.x` tag 上 patch +1，构建 linux-x64 + linux-arm64 两个包并发布 GitHub Release；推送 `doris-mcp-server-x.y.z` 格式的 tag 则按指定版本发版。
+**CI 发版**（`.github/workflows/release.yml`）：推送 `doris-mcp-server-x.y.z` 格式的 tag，自动构建 linux-x64 + linux-arm64 两个包并发布对应版本的 GitHub Release；也可以在 Actions 页面手动触发。
 
 ## 运行测试
 

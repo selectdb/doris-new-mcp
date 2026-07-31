@@ -547,11 +547,10 @@ dist/
 > 版本号单一事实源是 `pyproject.toml`；`build.sh` 的 `VERSION` 环境变量可覆盖（CI 从 Git tag 注入）。
 > 注意 `cryptography>=45.0.1` 是按目标机 glibc 2.32 兼容性选定的下限，不要随意抬高。
 
-### 12.2 CI 自动发版（`.github/workflows/release.yml`）
+### 12.2 CI 发版（`.github/workflows/release.yml`）
 
 | 触发方式 | 行为 |
 |----------|------|
-| PR 合入 main | 自动取最新 `doris-mcp-server-0.2.*` tag，patch +1，打 tag + 构建 + 发 Release |
 | 手动打 tag `doris-mcp-server-x.y.z` | 按 tag 版本号构建并发 Release |
 | Actions 手动触发 | 按输入版本号构建并发 Release |
 
