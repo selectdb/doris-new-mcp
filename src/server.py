@@ -192,6 +192,10 @@ def create_server(
     _watcher_initialized = False
     _example_auto_seed_done = False
     _example_lock = asyncio.Lock()
+    # Background example deploy/delete job state — the POST endpoint returns
+    # immediately and the frontend polls /example/deployment/status, so a
+    # slow seed never trips proxy/LB idle timeouts (504 HTML pages).
+    _example_job: dict = {"status": "idle", "message": "", "deploy": None}
 
     # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
@@ -268,6 +272,35 @@ def create_server(
             await asyncio.to_thread(
                 _shutil.rmtree, _ws_root / "example", ignore_errors=True
             )
+
+    async def _run_example_job(deploy: bool, user: str, password: str) -> None:
+        """Run example deploy/delete in the background and record the outcome."""
+        try:
+            if deploy:
+                await _deploy_example(user, password)
+                message = "Example files and sample database deployed."
+            else:
+                await _delete_example(user, password)
+                message = "Example files and sample database deleted."
+            from store.seed import is_example_deployed
+            deployed = await asyncio.to_thread(is_example_deployed)
+            log_tool_call(
+                "example_deployment",
+                client_id=user or "admin",
+                params={"deploy": deploy},
+                success=(deployed == deploy),
+                duration_ms=0,
+            )
+            if deployed != deploy:
+                _example_job.update(
+                    status="failed",
+                    message=f"Post-check failed: expected deployed={deploy}, got {deployed}",
+                )
+                return
+            _example_job.update(status="success", message=message)
+        except Exception as exc:
+            logger.exception("Example deployment switch failed")
+            _example_job.update(status="failed", message=str(exc))
             # Prevent seed_example=true from immediately undoing a manual delete.
             # It remains the default again after a process restart.
             _example_auto_seed_done = True
@@ -1011,49 +1044,49 @@ def create_server(
 
         user = session.get("doris_user", "") if session else ""
         password = session.get("doris_password", "") if session else ""
-        try:
-            if deploy:
-                await _deploy_example(user, password)
-                message = "Example files and sample database deployed."
-            else:
-                await _delete_example(user, password)
-                message = "Example files and sample database deleted."
-        except Exception as exc:
-            logger.exception("Example deployment switch failed")
+
+        if _example_job["status"] == "running":
             return _JSONResponse(
                 {
-                    "success": False,
-                    "error": {
-                        "code": "EXAMPLE_DEPLOYMENT_FAILED",
-                        "message": str(exc),
-                    },
-                },
-                status_code=500,
+                    "success": True,
+                    "data": {"status": "running", "message": _example_job["message"]},
+                }
             )
 
-        from store.seed import is_example_deployed
-        deployed = await asyncio.to_thread(is_example_deployed)
-        log_tool_call(
-            "example_deployment",
-            client_id=user or "admin",
-            params={"deploy": deploy},
-            success=(deployed == deploy),
-            duration_ms=0,
+        _example_job.update(
+            status="running",
+            message=(
+                "Deploying example files and sample database..."
+                if deploy
+                else "Deleting example files and sample database..."
+            ),
+            deploy=deploy,
         )
+        asyncio.get_running_loop().create_task(_run_example_job(deploy, user, password))
         return _JSONResponse(
             {
-                "success": deployed == deploy,
-                "data": {
-                    "deployed": deployed,
-                    "message": message,
-                    "redirect": (
-                        "/mcp/web/models?workspace=example"
-                        if deployed
-                        else "/mcp/web"
-                    ),
-                },
+                "success": True,
+                "data": {"status": "running", "message": _example_job["message"]},
             }
         )
+
+    @mcp.custom_route("/mcp/web/example/deployment/status", methods=["GET"])
+    async def api_example_deployment_status(request: Request) -> Response:
+        """Poll the background example deploy/delete job."""
+        session, err = _check_webui_admin_cookie(request)
+        if err:
+            return err
+        data: dict = {
+            "status": _example_job["status"],
+            "message": _example_job["message"],
+        }
+        if _example_job["status"] == "success":
+            deployed = bool(_example_job.get("deploy"))
+            data["deployed"] = deployed
+            data["redirect"] = (
+                "/mcp/web/models?workspace=example" if deployed else "/mcp/web"
+            )
+        return _JSONResponse({"success": True, "data": data})
 
     @mcp.custom_route("/mcp/web/workspace/create", methods=["POST"])
     async def api_workspace_create(request: Request) -> Response:
@@ -1530,25 +1563,44 @@ def create_server(
 function switchWorkspace(sel) { var u=new URL(window.location);u.searchParams.set("workspace",sel.value);window.location=u.toString(); }
 function createWorkspace() { var n=prompt("New workspace name (letters, numbers, underscores only):"); if(n) { fetch("/mcp/web/workspace/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})}).then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.error?d.error.message:"Failed")}); } }
 function deleteWorkspace(n) { if(confirm("Delete workspace '"+n+"' and all its models?")) { fetch("/mcp/web/workspace/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({workspace:n})}).then(r=>r.json()).then(d=>{if(d.success)location.href="/mcp/web";else alert(d.error?d.error.message:"Failed")}); } }
+function fetchJson(url,opts) {
+  return fetch(url,opts).then(function(r){
+    var ct=r.headers.get("content-type")||"";
+    if(ct.indexOf("json")===-1){throw new Error("Request failed (HTTP "+r.status+"), please retry.");}
+    return r.json();
+  });
+}
 function exampleAction(deploy) {
   if (!deploy && !confirm("Delete example models and all four sample data tables?")) return;
   var el=document.getElementById("ws-result");
   var label=deploy?"Deploying example":"Deleting example";
-  if(el){el.textContent="⏳ "+label+"...";el.style.display="block";}
-  fetch("/mcp/web/example/deployment",{
+  if(el){el.textContent="⏳ "+label+"...";el.style.display="block";el.style.background="";}
+  fetchJson("/mcp/web/example/deployment",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({deploy:deploy})
-  }).then(r=>r.json()).then(d=>{
-    if(!d.success){
-      var msg=d.error?d.error.message:"Failed";
-      if(el){el.textContent="❌ "+msg;el.style.background="#fce8e6";}else alert(msg);
+  }).then(function(d){
+    if(!d.success){throw new Error(d.error?d.error.message:"Failed");}
+    pollExampleStatus(el,0);
+  }).catch(function(e){
+    if(el){el.textContent="❌ "+e.message;el.style.background="#fce8e6";}else alert(e.message);
+  });
+}
+function pollExampleStatus(el,n) {
+  fetchJson("/mcp/web/example/deployment/status").then(function(d){
+    if(!d.success){throw new Error(d.error?d.error.message:"Failed");}
+    var st=d.data.status;
+    if(st==="running"||st==="idle"){
+      if(el){el.textContent="⏳ "+(d.data.message||"Working...")+" ("+(n*2)+"s)";}
+      if(n<150){setTimeout(function(){pollExampleStatus(el,n+1);},2000);}
+      else if(el){el.textContent="❌ Timed out waiting; refresh the page to check.";el.style.background="#fce8e6";}
       return;
     }
+    if(st==="failed"){if(el){el.textContent="❌ "+(d.data.message||"Failed");el.style.background="#fce8e6";}return;}
     if(el){el.textContent="✅ "+d.data.message;el.style.background="#e6f4ea";}
     setTimeout(function(){location.href=d.data.redirect||"/mcp/web";},800);
-  }).catch(e=>{
-    if(el){el.textContent="❌ "+e;el.style.background="#fce8e6";}else alert(e);
+  }).catch(function(e){
+    if(el){el.textContent="❌ "+e.message;el.style.background="#fce8e6";}
   });
 }
 function wsAction(url,label) {
