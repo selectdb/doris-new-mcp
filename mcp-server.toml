@@ -12,6 +12,10 @@ mcp_name = "doris-new-mcp"        # MCP 服务名称
 mcp_host = "0.0.0.0"              # HTTP 监听地址
 mcp_port = 3000                   # HTTP 监听端口
 fe_port = 9030                    # Doris FE MySQL 端口（同机 127.0.0.1）
+# privateIp = "10.0.0.13"        # 多机部署时把 Web UI 钉到一台固定节点：
+                                  # 所有节点填同一个 IP，全部 /mcp/web 请求
+                                  # （含登录）都会转发到该节点，session 只存在这台机器。
+                                  # 不配置则各节点按 Cookie 后缀做会话亲和。
 fe_host = "127.0.0.1"             # Doris FE 主机地址（同机部署保持 127.0.0.1）
 fe_user = "admin"                 # Doris FE 管理员用户名
 fe_password = ""                  # Doris FE 管理员密码，建议用 ${ENV_VAR} 环境变量注入
