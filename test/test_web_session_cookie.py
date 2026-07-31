@@ -59,9 +59,6 @@ class DecodeRejectsEdgeCases(unittest.TestCase):
     def test_text_in_ip_position(self) -> None:
         self.assertIsNone(_decode_webui_session_cookie("session_token.not-an-ip"))
 
-    def test_public_ipv4(self) -> None:
-        self.assertIsNone(_decode_webui_session_cookie("session_token.8.8.8.8"))
-
     def test_ipv6(self) -> None:
         self.assertIsNone(_decode_webui_session_cookie("session_token.fd00::1"))
 
@@ -89,8 +86,9 @@ class EncodeRejectsEdgeCases(unittest.TestCase):
             _encode_webui_session_cookie("session.token", "10.0.0.1")
 
     def test_public_ipv4(self) -> None:
-        with self.assertRaises(ValueError):
-            _encode_webui_session_cookie("tok", "8.8.8.8")
+        # Any IPv4 is a valid node identity (public-IP servers included).
+        cookie = _encode_webui_session_cookie("tok", "8.8.8.8")
+        self.assertEqual(_decode_webui_session_cookie(cookie), ("tok", "8.8.8.8"))
 
     def test_ipv6(self) -> None:
         with self.assertRaises(ValueError):
@@ -101,28 +99,33 @@ class EncodeRejectsEdgeCases(unittest.TestCase):
             _encode_webui_session_cookie("tok", "not.an.ip.address")
 
     def test_loopback_ipv4(self) -> None:
-        with self.assertRaises(ValueError):
-            _encode_webui_session_cookie("tok", "127.0.0.1")
+        # Loopback is the documented single-node fallback.
+        cookie = _encode_webui_session_cookie("tok", "127.0.0.1")
+        self.assertEqual(_decode_webui_session_cookie(cookie), ("tok", "127.0.0.1"))
 
     def test_link_local_ipv4(self) -> None:
-        with self.assertRaises(ValueError):
-            _encode_webui_session_cookie("tok", "169.254.12.34")
+        cookie = _encode_webui_session_cookie("tok", "169.254.12.34")
+        self.assertEqual(_decode_webui_session_cookie(cookie), ("tok", "169.254.12.34"))
 
 
-class DecodeRejectsNonRfc1918(unittest.TestCase):
-    """Decode must return ``None`` for non-RFC-1918 private IPv4 addresses."""
+class DecodeAcceptsNonRfc1918(unittest.TestCase):
+    """Decode must accept any IPv4 node identity, not just RFC-1918."""
 
     def test_loopback_127_0_0_1(self) -> None:
-        self.assertIsNone(_decode_webui_session_cookie("tok.127.0.0.1"))
+        self.assertEqual(_decode_webui_session_cookie("tok.127.0.0.1"), ("tok", "127.0.0.1"))
 
     def test_loopback_127_255_255_255(self) -> None:
-        self.assertIsNone(_decode_webui_session_cookie("tok.127.255.255.255"))
+        self.assertEqual(
+            _decode_webui_session_cookie("tok.127.255.255.255"), ("tok", "127.255.255.255"),
+        )
 
     def test_link_local_169_254_0_1(self) -> None:
-        self.assertIsNone(_decode_webui_session_cookie("tok.169.254.0.1"))
+        self.assertEqual(_decode_webui_session_cookie("tok.169.254.0.1"), ("tok", "169.254.0.1"))
 
     def test_link_local_169_254_255_255(self) -> None:
-        self.assertIsNone(_decode_webui_session_cookie("tok.169.254.255.255"))
+        self.assertEqual(
+            _decode_webui_session_cookie("tok.169.254.255.255"), ("tok", "169.254.255.255"),
+        )
 
 
 class Rfc1918BoundaryTests(unittest.TestCase):
@@ -165,16 +168,18 @@ class Rfc1918BoundaryTests(unittest.TestCase):
         )
 
     def test_near_miss_172_15_255_255(self) -> None:
-        """Just outside 172.16/12 — must be rejected."""
-        with self.assertRaises(ValueError):
-            _encode_webui_session_cookie("x", "172.15.255.255")
-        self.assertIsNone(_decode_webui_session_cookie("tok.172.15.255.255"))
+        """Just outside 172.16/12 — a public address, accepted like any IPv4."""
+        self.assertEqual(
+            _decode_webui_session_cookie(_encode_webui_session_cookie("x", "172.15.255.255")),
+            ("x", "172.15.255.255"),
+        )
 
     def test_near_miss_172_32_0_0(self) -> None:
-        """Just outside 172.16/12 on the upper side — must be rejected."""
-        with self.assertRaises(ValueError):
-            _encode_webui_session_cookie("x", "172.32.0.0")
-        self.assertIsNone(_decode_webui_session_cookie("tok.172.32.0.0"))
+        """Just outside 172.16/12 on the upper side — also accepted."""
+        self.assertEqual(
+            _decode_webui_session_cookie(_encode_webui_session_cookie("x", "172.32.0.0")),
+            ("x", "172.32.0.0"),
+        )
 
 
 if __name__ == "__main__":

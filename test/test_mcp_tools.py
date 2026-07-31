@@ -15,6 +15,7 @@ MCP Tool 测试用例 — 覆盖全部 10 个 Tool
 import json
 import os
 import sys
+import unittest
 import urllib.request
 import urllib.error
 
@@ -28,6 +29,9 @@ HEADERS = {
     "Accept": "application/json, text/event-stream",
     "Authorization": f"Bearer {AUTH_TOKEN}",
 }
+
+# 仅连接类异常允许跳过测试；AssertionError 必须冒出来
+_CONN_ERRORS = (urllib.error.URLError, ConnectionError, TimeoutError)
 
 
 def _call_tool(name: str, arguments: dict) -> dict:
@@ -132,7 +136,7 @@ def test_list_metrics_pagination():
 
 def test_list_dimensions_for_metric():
     """Tool #4: 列出指标维度"""
-    # 如果语义层未就绪，此测试可能失败；此时跳过
+    # 需要语义层就绪；仅在 MCP Server 不可达（连接类异常）时跳过
     try:
         data = _assert_success(
             _call_tool("list_dimensions_for_metric", {
@@ -142,8 +146,9 @@ def test_list_dimensions_for_metric():
         )
         assert "data" in data
         print(f"  ✅ total_amount 维度: {data['data']}")
-    except Exception as e:
-        print(f"  ⚠️ 语义层可能未就绪，跳过: {e}")
+    except _CONN_ERRORS as e:
+        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
+        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -161,8 +166,9 @@ def test_query_metric_basic():
         )
         assert "data" in data
         print(f"  ✅ query_metric 结果: {data['data']}")
-    except Exception as e:
-        print(f"  ⚠️ 语义查询跳过（可能语义层未就绪）: {e}")
+    except _CONN_ERRORS as e:
+        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
+        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
 
 
 def test_query_metric_with_group_by():
@@ -177,8 +183,9 @@ def test_query_metric_with_group_by():
         )
         assert "data" in data
         print(f"  ✅ 多指标+group_by 查询成功")
-    except Exception as e:
-        print(f"  ⚠️ 语义查询跳过（可能语义层未就绪）: {e}")
+    except _CONN_ERRORS as e:
+        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
+        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
 
 
 def test_query_metric_with_where():
@@ -192,8 +199,9 @@ def test_query_metric_with_where():
             })
         )
         print(f"  ✅ 带 where 条件的查询成功")
-    except Exception as e:
-        print(f"  ⚠️ 语义查询跳过（可能语义层未就绪）: {e}")
+    except _CONN_ERRORS as e:
+        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
+        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
 
 
 def test_query_metric_with_order_and_limit():
@@ -209,8 +217,9 @@ def test_query_metric_with_order_and_limit():
             })
         )
         print(f"  ✅ 排序+分页查询成功")
-    except Exception as e:
-        print(f"  ⚠️ 语义查询跳过（可能语义层未就绪）: {e}")
+    except _CONN_ERRORS as e:
+        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
+        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -401,9 +410,13 @@ def test_execute_query_blocked_write():
 def test_reload_semantic_layer():
     """Tool #10: 手动重载语义层"""
     result = _call_tool("reload_semantic_layer", {"workspace": WORKSPACE})
-    # 可能返回成功或 not_ready（因为 example workspace 的 YAML 可能有配置问题）
-    assert "result" in result or "error" in result
-    print(f"  ✅ reload 调用成功")
+    # 必须返回合法的 JSON-RPC result，content 为可解析的结构化 JSON
+    # （success_response / error_response 都带 success 字段）
+    assert "result" in result, f"Expected JSON-RPC result: {json.dumps(result, ensure_ascii=False)[:500]}"
+    content = result["result"]["content"][0]["text"]
+    data = json.loads(content)
+    assert "success" in data, f"Payload missing 'success' field: {data}"
+    print(f"  ✅ reload 调用成功 (success={data['success']})")
 
 
 # ═══════════════════════════════════════════════════════

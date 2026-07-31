@@ -32,10 +32,6 @@ class PoolManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._meta_lock = asyncio.Lock()
 
-    def get_pool(self, user: str) -> ConnectionPool | None:
-        """Get the connection pool for a user, or None if not found."""
-        return self._pools.get(user)
-
     async def get_or_create_local_pool(
         self, user: str, password: str = "",
         host: str | None = None,
@@ -108,22 +104,6 @@ class PoolManager:
             logger.info("Evicted pool for user '%s'", user)
         except Exception:
             logger.exception("Error while closing pool for user '%s'", user)
-
-    async def cleanup_idle_pools(self, active_users: set[str]) -> None:
-        """Close and remove pools for users not in *active_users*.
-
-        Called periodically to release resources for expired sessions.
-        """
-        async with self._meta_lock:
-            to_remove = [u for u in self._pools if u not in active_users]
-
-        for user in to_remove:
-            try:
-                await self.evict(user)
-            except Exception:
-                logger.exception(
-                    "cleanup_idle_pools: failed to evict user '%s'", user,
-                )
 
     async def close_all(self) -> None:
         """Close all connection pools. Called on server shutdown."""

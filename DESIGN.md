@@ -372,8 +372,6 @@ SemanticManifest(semantic_manifest.json)
   .list_metrics()                    # → [{name, description}, ...]
   .get_metric(name)                  # → 完整指标定义
   .list_dimensions_for_metric(name)  # → [{name, type, description}, ...]
-  .search(keywords)                  # → [{type, name, description}, ...]
-  .get_semantic_table_names()        # → 表名集合（用于冲突检测）
 ```
 
 ---
@@ -507,19 +505,18 @@ doris-mcp-client semantic status
 ./build.sh clean           # 清理 python/、dist/、构建产物
 ```
 
-从 `astral-sh/python-build-standalone` 下载 Python 3.10 独立发行版，根据 `requirements.txt` 安装依赖，生成两个自包含 tar.gz 包到 `dist/`：
+从 `astral-sh/python-build-standalone` 下载 Python 3.10 独立发行版，根据 `requirements.txt` 安装依赖，生成一个自包含全量 tar.gz 包（server + client + 文档 + Python 运行时）到 `dist/`：
 
 ```
 dist/
-├── doris-mcp-server-0.3.0-{platform}.tar.gz    ← python/ + src/ + 配置
-└── doris-mcp-client-0.3.0-{platform}.tar.gz    ← python/ + mcp-client/
+└── doris-mcp-server-1.3.1-{platform}.tar.gz    ← python/ + src/ + 配置 + mcp-client/
 ```
 
 ### 12.2 部署
 
 ```bash
 # 1. 解压
-tar xzf doris-mcp-server-0.3.0-linux-x64.tar.gz
+tar xzf doris-mcp-server-1.3.1-linux-x64.tar.gz
 cd doris-mcp-server
 
 # 2. 配置（可选，默认 localhost:9030 即可）
@@ -567,9 +564,7 @@ doris-mcp-server/
 │   ├── auth/                    # 认证模块
 │   │   ├── credential_cache.py  # 10 分钟 TTL 内存缓存
 │   │   ├── credential_verifier.py # Bearer token → Doris 验证
-│   │   ├── guard.py             # Tool 级访问控制
-│   │   ├── provider.py          # StaticTokenVerifier、JWTVerifier
-│   │   └── config.py            # 认证配置解析
+│   │   └── guard.py             # Tool 级访问控制
 │   ├── config/
 │   │   └── loader.py            # TOML/YAML 配置 + ${VAR} 环境变量插值
 │   ├── core/                    # 核心模块
@@ -582,8 +577,8 @@ doris-mcp-server/
 │   │   ├── charset.py           # 字符集中间件
 │   │   ├── request_logger.py    # 请求日志中间件
 │   │   ├── pagination.py        # 游标分页
-│   │   ├── semantic_guard.py    # 语义冲突检测
-│   │   └── sensitive_mask.py    # 敏感数据脱敏
+│   │   ├── sensitive_mask.py    # 敏感数据脱敏
+│   │   └── session_affinity_proxy.py # Web UI 路由的 ASGI 会话亲和反向代理
 │   ├── store/                   # 工作区存储模块
 │   │   ├── store.py             # DorisStore：每工作区 active/staging 表
 │   │   ├── watcher.py           # MultiWorkspaceWatcher：轮询、重载、验证、提交
@@ -593,6 +588,7 @@ doris-mcp-server/
 │   │   ├── seed.py              # 示例数据播种
 │   │   └── version.py           # 工作区版本追踪
 │   ├── tools/                   # Tool 实现
+│   │   ├── dependency.py        # 跨文件依赖检测（安全删除 YAML 前校验）
 │   │   ├── discovery.py         # list_databases、list_tables、describe_table
 │   │   ├── query.py             # execute_query（SQL 执行）
 │   │   └── semantic.py          # list_metrics、list_dimensions_for_metric、query_metric

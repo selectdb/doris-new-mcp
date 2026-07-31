@@ -10,11 +10,19 @@ Web UI & REST API 测试用例
 
 用法:
   python test/test_web_api.py
+
+环境变量:
+  MCP_BASE_URL               服务器地址 (默认 http://localhost:3000)
+  MCP_TOKEN                  Bearer token (默认 admin:admin)
+  DORIS_USER / DORIS_PASS    Doris 登录凭据 (默认 admin / admin)
+  DORIS_MCP_TEST_DESTRUCTIVE=1  才执行破坏性用例 (discard 暂存变更、
+                                创建/删除工作区)，默认跳过
 """
 
 import json
 import os
 import sys
+import unittest
 import urllib.request
 import urllib.error
 import http.cookiejar
@@ -26,6 +34,9 @@ AUTH_TOKEN = os.environ.get("MCP_TOKEN", "admin:admin")
 WORKSPACE = os.environ.get("MCP_WORKSPACE", "example")
 TEST_DORIS_USER = os.environ.get("DORIS_USER", "admin")
 TEST_DORIS_PASS = os.environ.get("DORIS_PASS", "admin")
+# 破坏性用例（会 discard 共享服务器上的真实暂存变更、创建/删除工作区）
+# 默认跳过，显式设置 DORIS_MCP_TEST_DESTRUCTIVE=1 才执行
+DESTRUCTIVE = os.environ.get("DORIS_MCP_TEST_DESTRUCTIVE") == "1"
 
 HEADERS = {
     "Authorization": f"Bearer {AUTH_TOKEN}",
@@ -34,6 +45,28 @@ JSON_HEADERS = {
     **HEADERS,
     "Content-Type": "application/json",
 }
+
+
+def _require_destructive():
+    """破坏性用例守卫：未设置 DORIS_MCP_TEST_DESTRUCTIVE=1 时跳过。"""
+    if not DESTRUCTIVE:
+        raise unittest.SkipTest(
+            "跳过：破坏性用例需 DORIS_MCP_TEST_DESTRUCTIVE=1 才执行"
+        )
+
+
+def _server_reachable() -> bool:
+    """探测 MCP Server 是否可达（登录页应返回 200）。
+
+    只认 200：连接拒绝是未启动；502/404 等说明端口被其他服务占用，
+    同样视为不可达，避免对错误的目标跑完整套用例。
+    """
+    req = urllib.request.Request(f"{BASE_URL}/mcp/web/login", headers={})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.HTTPError, OSError):
+        return False
 
 
 def _get(path: str, headers: dict = None, expect_code: int = 200) -> dict:
@@ -173,7 +206,11 @@ def test_api_staging_validate():
 
 
 def test_api_staging_discard():
-    """POST /mcp/web/staging/discard — 丢弃暂存变更"""
+    """POST /mcp/web/staging/discard — 丢弃暂存变更
+
+    破坏性：会丢弃共享服务器上真实用户的暂存变更，默认跳过。
+    """
+    _require_destructive()
     status, body = _post("/mcp/web/staging/discard", {"workspace": WORKSPACE})
     assert status == 200
     print(f"  ✅ discard: {json.dumps(body, ensure_ascii=False)[:200]}")
@@ -184,7 +221,11 @@ def test_api_staging_discard():
 # ═══════════════════════════════════════════════════════
 
 def test_api_workspace_create_and_delete():
-    """创建 → 验证 → 删除 工作区"""
+    """创建 → 验证 → 删除 工作区
+
+    破坏性：会在服务器上创建/删除真实工作区，默认跳过。
+    """
+    _require_destructive()
     test_ws = "test_workspace_tmp"
 
     # 清理残留
@@ -279,6 +320,10 @@ if __name__ == "__main__":
     print(f"  Workspace: {WORKSPACE}")
     print("=" * 60)
 
+    if not _server_reachable():
+        print(f"\n⚠️ MCP Server 不可达 ({BASE_URL})，整体跳过，不视为失败")
+        sys.exit(0)
+
     tests = [
         # Web UI
         ("Web UI login page", test_webui_login_page),
@@ -300,11 +345,15 @@ if __name__ == "__main__":
 
     passed = 0
     failed = 0
+    skipped = 0
     for name, fn in tests:
         try:
             print(f"\n[{name}]")
             fn()
             passed += 1
+        except unittest.SkipTest as e:
+            print(f"  ⚠️ SKIP: {e}")
+            skipped += 1
         except AssertionError as e:
             print(f"  ❌ FAIL: {e}")
             failed += 1
@@ -315,7 +364,7 @@ if __name__ == "__main__":
             traceback.print_exc()
 
     print(f"\n{'='*60}")
-    print(f"结果: {passed} passed, {failed} failed")
+    print(f"结果: {passed} passed, {failed} failed, {skipped} skipped")
     print(f"{'='*60}")
     if failed > 0:
         sys.exit(1)

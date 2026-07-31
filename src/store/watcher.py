@@ -178,19 +178,6 @@ class MetricRouter:
                     continue
                 self._map[name] = (ws.compiler, ws_name)
 
-    def resolve(self, metric: str) -> tuple[Any, str] | None:
-        return self._map.get(metric)
-
-    def resolve_manifest(self, metric: str) -> tuple[Any, str] | None:
-        """Resolve manifest + workspace name (for read-only tools)."""
-        entry = self._map.get(metric)
-        if entry is None:
-            return None
-        # The compiler's manifest is at compiler._project_dir / target / semantic_manifest.json
-        # But manifest is on the workspace. We return compiler + ws_name, and the tool
-        # uses the workspace's manifest explicitly.
-        return entry
-
 
 # ---------------------------------------------------------------------------
 # MultiWorkspaceWatcher
@@ -238,14 +225,6 @@ class MultiWorkspaceWatcher:
     def get_workspace(self, name: str) -> WorkspaceState | None:
         return self._workspaces.get(name)
 
-    def get_manifest(self, workspace: str) -> Any | None:
-        ws = self._workspaces.get(workspace)
-        return ws.manifest if ws else None
-
-    def get_compiler(self, workspace: str) -> Any | None:
-        ws = self._workspaces.get(workspace)
-        return ws.compiler if ws else None
-
     def workspace_names(self) -> list[str]:
         return sorted(self._workspaces.keys())
 
@@ -273,6 +252,10 @@ class MultiWorkspaceWatcher:
         logger.info(f"Watcher initialized: {len(self._workspaces)} workspace(s)")
 
     def _init_workspace(self, ws_name: str, first_load: bool = False) -> WorkspaceState:
+        # Invalidate any negative-cache verdict (e.g. workspace just created
+        # via api_workspace_create after earlier "not found" lookups).
+        self.__dict__.setdefault("_missing_workspaces", {}).pop(ws_name, None)
+
         store = DorisStore(workspace=ws_name)
         ws_dir = self._workspace_root / ws_name
         models_dir = ws_dir / "models_cache"
@@ -306,6 +289,7 @@ class MultiWorkspaceWatcher:
     # ------------------------------------------------------------------
 
     _FRESHNESS_TTL = 60.0  # seconds between reload checks
+    _MISSING_WS_TTL = 30.0  # seconds to remember a "workspace not found" verdict
 
     def ensure_fresh(self, workspace_name: str) -> WorkspaceState | None:
         """Ensure the workspace manifest/compiler is up-to-date.
@@ -313,20 +297,40 @@ class MultiWorkspaceWatcher:
         Called from tool handlers within request context.  If the
         workspace hasn't been loaded yet, discovers it.  Cooldown
         prevents redundant reloads within _FRESHNESS_TTL seconds.
+        A "workspace not found" verdict is negative-cached for
+        _MISSING_WS_TTL seconds so repeated calls with a bad workspace
+        name don't each cost a Doris round-trip.
 
         Returns WorkspaceState on success, None if workspace not found
         or store unavailable.
         """
         # Lazy discover
         if workspace_name not in self._workspaces:
+            # Negative cache: name → epoch of the last "not found" verdict.
+            # Runs under asyncio.to_thread (multi-threaded); single dict
+            # operations are atomic under the GIL, and a rare duplicate
+            # discover on a race is harmless, so no lock is needed.
+            # setdefault also covers watchers built without __init__ (tests).
+            missing: dict[str, float] = self.__dict__.setdefault("_missing_workspaces", {})
+            now = time.time()
+            cached_at = missing.get(workspace_name)
+            if cached_at is not None and now - cached_at < self._MISSING_WS_TTL:
+                return None
             try:
                 existing = set(DorisStore.discover_workspaces())
             except Exception:
                 logger.warning(f"ensure_fresh [{workspace_name}]: discover failed")
                 return None
             if workspace_name in existing:
+                missing.pop(workspace_name, None)
                 self._init_workspace(workspace_name, first_load=True)
             else:
+                # Drop expired entries so the cache stays bounded to the
+                # distinct bad names seen within one TTL window.
+                for name, ts in list(missing.items()):
+                    if now - ts >= self._MISSING_WS_TTL:
+                        del missing[name]
+                missing[workspace_name] = now
                 logger.warning(f"ensure_fresh [{workspace_name}]: workspace not found")
                 return None
 

@@ -1,10 +1,14 @@
 # =============================================================================
-# Release — 打 tag 自动构建 linux x64 / arm64 并发布 GitHub Release
+# Release — 自动构建 linux x64 / arm64 并发布 GitHub Release
 #
-#   用法:  git tag doris-mcp-server-0.2.2 && git push origin doris-mcp-server-0.2.2
+#   触发方式:
+#     1. PR 合入 main 后自动发版，版本号在最新 0.2.x tag 上 +1
+#        （如最新 tag 是 doris-mcp-server-0.2.2 → 发布 0.2.3）
+#     2. 手动打 tag:  git tag doris-mcp-server-0.2.3 && git push origin doris-mcp-server-0.2.3
+#     3. Actions 页面手动触发（需填版本号）
 #
-#   产物:  doris-mcp-server-0.2.2-linux-x64.tar.gz
-#         doris-mcp-server-0.2.2-linux-arm64.tar.gz
+#   产物:  doris-mcp-server-<version>-linux-x64.tar.gz
+#         doris-mcp-server-<version>-linux-arm64.tar.gz
 #   解压后顶层目录均为 doris-mcp-server/（与 build.sh 原有约定一致）
 #
 #   说明:  私有仓库无免费 ARM runner，linux-arm64 在 x64 runner 上通过
@@ -14,16 +18,55 @@
 name: Release
 
 on:
+  pull_request:
+    types: [closed]
+    branches: [main]
   push:
     tags: ["doris-mcp-server-*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号（如 0.2.2，不带前缀）"
+        description: "版本号（如 0.2.3，不带前缀）"
         required: true
 
 jobs:
+  # ── 计算本次发布的版本号 ─────────────────────────────────────────────
+  version:
+    # PR close 事件只在真正合入时继续
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#doris-mcp-server-}"
+          else
+            # PR 合入：在最新 doris-mcp-server-0.2.x tag 的 patch 上 +1
+            git fetch origin --tags --force >/dev/null 2>&1 || true
+            LATEST=$(git tag -l 'doris-mcp-server-0.2.*' | sed 's/doris-mcp-server-//' | sort -V | tail -n1)
+            if [ -z "$LATEST" ]; then
+              LATEST="0.2.2"
+            fi
+            PATCH="${LATEST##*.}"
+            V="0.2.$((PATCH + 1))"
+            echo "Latest tag version: $LATEST → next: $V"
+          fi
+          if git rev-parse "doris-mcp-server-$V" >/dev/null 2>&1; then
+            echo "::error::Tag doris-mcp-server-$V already exists"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  # ── 构建（x64 原生 + arm64 交叉） ────────────────────────────────────
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -32,30 +75,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version
-        id: ver
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#doris-mcp-server-}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build ${{ matrix.platform }}
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: ./build.sh ${{ matrix.platform }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: doris-mcp-server-${{ steps.ver.outputs.version }}-${{ matrix.platform }}
-          path: dist/doris-mcp-server-${{ steps.ver.outputs.version }}-${{ matrix.platform }}.tar.gz
+          name: doris-mcp-server-${{ needs.version.outputs.version }}-${{ matrix.platform }}
+          path: dist/doris-mcp-server-${{ needs.version.outputs.version }}-${{ matrix.platform }}.tar.gz
           if-no-files-found: error
 
+  # ── 打 tag + 发布 Release ────────────────────────────────────────────
   release:
-    if: github.event_name == 'push'
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -70,4 +104,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # tag 不存在时自动在当前 commit 上创建
+          tag_name: doris-mcp-server-${{ needs.version.outputs.version }}
+          name: doris-mcp-server-${{ needs.version.outputs.version }}
           files: dist/*.tar.gz
+          body: ""

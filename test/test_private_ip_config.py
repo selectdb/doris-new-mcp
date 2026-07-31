@@ -1,4 +1,4 @@
-"""Offline tests for configured RFC-1918 addresses and startup wiring."""
+"""Offline tests for configured node-IP addresses and startup wiring."""
 
 from __future__ import annotations
 
@@ -57,6 +57,14 @@ class ResolveMachineIpTests(unittest.TestCase):
                 self.assertEqual(server.resolve_machine_ip(configured), expected)
                 detected.assert_not_called()
 
+    def test_configured_non_rfc1918_ipv4_is_accepted_without_detection(self) -> None:
+        # Public / loopback / link-local IPv4 are usable (with a warning) —
+        # startup must not require a private address.
+        for configured in ("8.8.8.8", "127.0.0.1", "169.254.1.1"):
+            with self.subTest(configured=configured), patch.object(server, "get_machine_ip") as detected:
+                self.assertEqual(server.resolve_machine_ip(configured), configured)
+                detected.assert_not_called()
+
     def test_blank_configurations_detect_an_rfc1918_address(self) -> None:
         for configured in ("", " \t\n ", None):
             with self.subTest(configured=configured), patch.object(server, "get_machine_ip", return_value="10.9.8.7") as detected:
@@ -64,23 +72,27 @@ class ResolveMachineIpTests(unittest.TestCase):
                 detected.assert_called_once_with()
 
     def test_invalid_configurations_are_rejected_without_detection(self) -> None:
-        invalid = ("not-an-ip", "8.8.8.8", "2001:db8::1", "127.0.0.1", "169.254.1.1")
+        invalid = ("not-an-ip", "2001:db8::1")
         for configured in invalid:
             with self.subTest(configured=configured), patch.object(server, "get_machine_ip") as detected:
                 with self.assertRaises(ValueError):
                     server.resolve_machine_ip(configured)
                 detected.assert_not_called()
 
-    def test_invalid_automatically_detected_addresses_are_rejected(self) -> None:
-        for detected_ip in ("8.8.8.8", "not-an-ip"):
+    def test_detected_public_ipv4_is_accepted(self) -> None:
+        with patch.object(server, "get_machine_ip", return_value="8.8.8.8") as detected:
+            self.assertEqual(server.resolve_machine_ip(""), "8.8.8.8")
+            detected.assert_called_once_with()
+
+    def test_failed_or_garbage_detection_falls_back_to_loopback(self) -> None:
+        for detected_ip in (None, "not-an-ip", "2001:db8::1"):
             with self.subTest(detected_ip=detected_ip), patch.object(server, "get_machine_ip", return_value=detected_ip) as detected:
-                with self.assertRaises(ValueError):
-                    server.resolve_machine_ip("")
+                self.assertEqual(server.resolve_machine_ip(""), "127.0.0.1")
                 detected.assert_called_once_with()
 
 
 class MainPrivateIpFlowTests(unittest.TestCase):
-    def test_main_resolves_cfg_mcp_private_ip_and_passes_it_to_server(self) -> None:
+    def test_main_resolves_cfg_mcp_private_ip_and_passes_config_to_server(self) -> None:
         cfg = SimpleNamespace(mcp=SimpleNamespace(private_ip="10.20.30.40", host="127.0.0.1", port=3000))
         mcp = MagicMock()
         with (
@@ -91,13 +103,12 @@ class MainPrivateIpFlowTests(unittest.TestCase):
         ):
             app_main.main()
 
-        # machine_ip via auto-detect, webui_ip via configured privateIp
-        self.assertEqual(resolve.call_count, 2)
-        resolve.assert_any_call("")
-        resolve.assert_any_call(cfg.mcp.private_ip)
+        # Node identity resolved once from the configured privateIp; the
+        # already-parsed config is handed to create_server (no second parse).
+        resolve.assert_called_once_with(cfg.mcp.private_ip)
         create.assert_called_once_with(
             config_dir="/offline-config", env_file=None,
-            machine_ip="10.20.30.40", webui_ip="10.20.30.40"
+            machine_ip="10.20.30.40", config=cfg,
         )
         mcp.run.assert_called_once()
 

@@ -44,7 +44,10 @@ class PydanticProjectConfiguration(HashableBaseModel, ModelWithMetadataParsing, 
         try:
             return PydanticSemanticVersion.create_from_string(version("dbt_semantic_interfaces"))
         except PackageNotFoundError:
-            try:
-                return PydanticSemanticVersion.create_from_string(version("mcp-server"))
-            except PackageNotFoundError:
-                return PydanticSemanticVersion.create_from_string("0.0.0")
+            pass
+        # Fallback: this project is distributed as "doris-new-mcp" (see pyproject.toml).
+        # It may not be installed as a dist (e.g. running from source), so keep 0.0.0 as last resort.
+        try:
+            return PydanticSemanticVersion.create_from_string(version("doris-new-mcp"))
+        except PackageNotFoundError:
+            return PydanticSemanticVersion.create_from_string("0.0.0")

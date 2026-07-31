@@ -6,6 +6,8 @@ Apache Doris MCP Server — 基于 MCP 协议的 Doris 查询服务，内置 Met
 
 ```
 ├── build.sh                 # 编译构建脚本
+├── pyproject.toml           # 项目元数据 + 依赖（版本号单一事实源）
+├── uv.lock                  # uv 锁定的依赖版本
 ├── requirements.txt         # Python 依赖列表
 ├── mcp-server.toml          # 服务配置文件
 ├── start-mcp-server.sh      # 启动脚本
@@ -21,7 +23,7 @@ Apache Doris MCP Server — 基于 MCP 协议的 Doris 查询服务，内置 Met
 
 - Linux x86_64 环境
 - curl 或 wget（方式一需要）
-- Python 3.10+（方式二需要，已有 conda/miniconda 即可）
+- Python 3.10.x（方式二需要，必须是 3.10.x，已有 conda/miniconda 即可）
 
 ### 方式一：在线编译（GitHub 可访问）
 
@@ -54,11 +56,10 @@ DORIS_MCP_SYSTEM_PYTHON=/opt/miniconda3/bin/python ./build.sh linux-x64
 
 ```
 dist/
-├── doris-mcp-server-0.3.0-linux-x64.tar.gz   # 服务端 (~92MB)
-└── doris-mcp-client-0.3.0-linux-x64.tar.gz   # CLI 客户端 (~92MB)
+└── doris-mcp-server-1.3.1-linux-x64.tar.gz   # 单包 all-in-one（server + client + 文档 + Python 运行时）
 ```
 
-两个包都是 **完全自包含** 的：自带 Python 解释器 + 所有 pip 依赖，部署无需网络、无需系统 Python。
+该包是 **完全自包含** 的：自带 Python 解释器 + 所有 pip 依赖，部署无需网络、无需系统 Python。
 
 ### 清理
 
@@ -70,8 +71,8 @@ dist/
 
 ```bash
 # 解压即用
-tar xzf dist/doris-mcp-server-0.3.0-linux-x64.tar.gz
-cd doris-new-mcp
+tar xzf dist/doris-mcp-server-1.3.1-linux-x64.tar.gz
+cd doris-mcp-server
 
 # 确保同机 Doris FE 运行在 127.0.0.1:9030
 

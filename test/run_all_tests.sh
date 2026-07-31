@@ -3,10 +3,11 @@
 # test/run_all_tests.sh — 一键运行所有测试
 #
 # 用法:
-#   bash test/run_all_tests.sh              # 运行全部测试
-#   bash test/run_all_tests.sh --tools       # 仅 Tool 测试
-#   bash test/run_all_tests.sh --web         # 仅 Web/API 测试
-#   bash test/run_all_tests.sh --smoke       # 冒烟测试 (快速)
+#   bash test/run_all_tests.sh              # 运行全部测试（需 MCP Server）
+#   bash test/run_all_tests.sh --offline    # 仅离线单元测试（无需 MCP Server）
+#   bash test/run_all_tests.sh --tools      # 离线测试 + 仅 Tool 在线测试
+#   bash test/run_all_tests.sh --web        # 离线测试 + 仅 Web/API 在线测试
+#   bash test/run_all_tests.sh --smoke      # 离线测试 + 冒烟测试 (快速)
 # =============================================================================
 set -euo pipefail
 
@@ -14,6 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MCP_URL="${MCP_URL:-http://localhost:3000/mcp}"
 MCP_BASE_URL="${MCP_BASE_URL:-http://localhost:3000}"
+
+# 优先使用项目 venv 的解释器（离线测试依赖其中的第三方包）
+PYTHON_BIN="${PYTHON_BIN:-$PROJECT_DIR/.venv/bin/python}"
+if [ ! -x "$PYTHON_BIN" ]; then
+    PYTHON_BIN="python3"
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -39,7 +46,7 @@ run_python_test() {
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}  $label${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    if python3 "$test_file"; then
+    if "$PYTHON_BIN" "$test_file"; then
         echo -e "${GREEN}✅ $label 通过${NC}"
         return 0
     else
@@ -113,7 +120,17 @@ smoke_test() {
 
 # ── 离线单元测试（无需启动 MCP Server） ─────────
 run_offline_unit_tests() {
+    run_python_test "$SCRIPT_DIR/test_sql_validator.py" "SQL 只读校验离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_sensitive_mask.py" "敏感信息脱敏离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_pagination.py" "分页离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_private_ip_config.py" "私网 IP 配置离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_deps.py" "运行时依赖守卫离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_cross_file_deps.py" "跨文件依赖检测离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_credential_pass.py" "凭据透传离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_watcher.py" "工作区 Watcher 离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_manifest_dims.py" "指标维度提取离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_compiler_where.py" "WHERE 字面量处理离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_web_session_cookie.py" "Web 会话 Cookie 离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_routing.py" "会话亲和代理路由离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_streaming.py" "会话亲和代理流式离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_relogin.py" "会话亲和代理重登录离线单元测试" || ((FAIL_COUNT += 1))
@@ -122,29 +139,39 @@ run_offline_unit_tests() {
 
 # ── Main ─────────────────────────────────────────
 FAIL_COUNT=0
+MODE="${1:-}"
+
 # Keep these deterministic tests ahead of every live-server test stage.
 run_offline_unit_tests
-check_server
 
-case "${1:-}" in
+if [ "$MODE" = "--offline" ]; then
+    : # 离线模式：不检查服务器、不跑在线阶段
+else
+    check_server
+fi
+
+case "$MODE" in
+    --offline)
+        ;;
     --tools)
-        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools 测试" || ((FAIL_COUNT++))
+        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools 测试" || ((FAIL_COUNT += 1))
         ;;
     --web)
-        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API 测试" || ((FAIL_COUNT++))
+        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API 测试" || ((FAIL_COUNT += 1))
         ;;
     --smoke)
-        smoke_test || ((FAIL_COUNT++))
+        smoke_test || ((FAIL_COUNT += 1))
         ;;
     "")
         # 全部运行
-        smoke_test || ((FAIL_COUNT++))
-        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools 测试" || ((FAIL_COUNT++))
-        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API 测试" || ((FAIL_COUNT++))
+        smoke_test || ((FAIL_COUNT += 1))
+        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools 测试" || ((FAIL_COUNT += 1))
+        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API 测试" || ((FAIL_COUNT += 1))
         ;;
     *)
-        echo "Usage: $0 [--tools|--web|--smoke]"
-        echo "  (no args)  运行全部测试"
+        echo "Usage: $0 [--offline|--tools|--web|--smoke]"
+        echo "  (no args)  运行全部测试（需 MCP Server）"
+        echo "  --offline  仅离线单元测试（无需 MCP Server）"
         echo "  --tools    仅 MCP Tool 测试"
         echo "  --web      仅 Web UI & API 测试"
         echo "  --smoke    仅冒烟测试 (快速)"
