@@ -71,7 +71,7 @@ dist/
 
 ```bash
 # 解压即用
-tar xzf dist/doris-mcp-server-1.3.1-linux-x64.tar.gz
+tar xzf dist/doris-mcp-server-{version}-linux-x64.tar.gz
 cd doris-mcp-server
 
 # 确保同机 Doris FE 运行在 127.0.0.1:9030
@@ -83,13 +83,34 @@ cd doris-mcp-server
 nohup ./start-mcp-server.sh > /dev/null 2>&1 &
 ```
 
+### 多机部署（同一域名多节点）
+
+多台 MCP Server 挂在 ALB 后方时，只需在**所有节点**的 `mcp-server.toml` 中配置同一个 `privateIp`：
+
+```toml
+[server]
+privateIp = "10.0.0.13"   # 所有节点填同一个 IP：指定的 Web UI 节点
+```
+
+效果：
+
+- 所有 `/mcp/web` 请求（含登录）自动转发到该节点，session 只存在一台机器
+- `/mcp`（MCP 协议）无状态，各节点本地处理
+- 三台机器配置文件完全一致，nginx 只做哑代理，无需任何 Cookie 解析
+- 不配置 `privateIp` 时退化为按 Cookie 后缀的会话亲和（各节点自动探测本机 IP）
+
+详见 [DESIGN.md](DESIGN.md) §8.3。
+
 ## 运行测试
 
 ```bash
-# 冒烟测试（快速，约 5 秒）
+# 离线单元测试（无需 MCP Server）
+bash test/run_all_tests.sh --offline
+
+# 冒烟测试（快速）
 bash test/run_all_tests.sh --smoke
 
-# 全部测试（42 用例）
+# 全部测试（需本地 MCP Server）
 bash test/run_all_tests.sh
 ```
 
