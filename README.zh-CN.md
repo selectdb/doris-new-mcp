@@ -99,6 +99,8 @@ claude mcp add --transport http doris http://<host>:3000/mcp \
 }
 ```
 
+可直接复制的模板见 [`mcp.json.example`](mcp.json.example)。
+
 **用 FastMCP CLI 冒烟测试：**
 
 ```bash

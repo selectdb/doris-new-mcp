@@ -99,6 +99,8 @@ claude mcp add --transport http doris http://<host>:3000/mcp \
 }
 ```
 
+A ready-to-copy template is provided at [`mcp.json.example`](mcp.json.example).
+
 **Smoke-test the connection with the FastMCP CLI:**
 
 ```bash
