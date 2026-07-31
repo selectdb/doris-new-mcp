@@ -57,7 +57,7 @@
 main()
   ├─ 解析参数 (--config-dir, --env-file)
   ├─ AppConfig.load(mcp-server.toml)   ← TOML 配置文件，支持 ${VAR} 环境变量插值
-  ├─ resolve_machine_ip(privateIp)     ← Web UI 节点身份（钉死模式目标 / Cookie 亲和后缀）
+  ├─ resolve_machine_ip(privateIp)     ← Web UI 节点身份（固定入口 / Cookie 亲和后缀）
   └─ create_server()
        ├─ MultiWorkspaceWatcher         ← 懒初始化：首个已认证请求时才扫描工作区
        ├─ PoolManager                   ← 每用户 aiomysql 连接池工厂（无共享 admin 池）
@@ -69,7 +69,7 @@ main()
 mcp.run(transport="streamable-http", stateless_http=True, port=3000,
         middleware=[
           RequestLoggerMiddleware,        ← 请求/响应日志（敏感信息脱敏）
-          SessionAffinityProxyMiddleware, ← Web UI 会话亲和 / 单节点钉死（见 §8.3）
+          SessionAffinityProxyMiddleware, ← Web UI 会话亲和（见 §8.3）
           CharsetMiddleware,              ← 字符集处理
         ])
 ```
@@ -92,8 +92,8 @@ mcp_port = 3000                 # HTTP 端口
 fe_port = 9030                  # Doris FE MySQL 端口（同机 127.0.0.1）
 seed_example = false            # 默认不部署；Admin 可在 WebUI 手动部署
 admin_users = ["admin"]         # Admin 用户列表（WebUI 管理操作、example 部署）
-# privateIp = "10.0.0.13"      # 多机部署：所有节点填同一 IP，把 Web UI 钉死在该节点
-                                # （含登录转发）；不配置则按 Cookie 后缀做会话亲和。见 §8.3
+# privateIp = "10.0.0.13"      # 可选：所有节点填同一 IP，/mcp/web 请求（含登录）
+                                # 固定转发到该节点；不配置则按 Cookie 后缀亲和。见 §8.3
 
 [logging]
 level = "info"                  # debug|info|warning|error
@@ -450,34 +450,13 @@ ConnectionPool
 
 ### 8.3 多机部署与会话亲和
 
-多台 MCP Server 挂在同一域名（ALB）后方时，Web UI 会话是单机内存态，必须保证同一浏览器的请求落到同一台机器。由 `SessionAffinityProxyMiddleware`（`src/core/session_affinity_proxy.py`）在**应用层**完成转发，nginx 只做哑代理（`proxy_pass http://127.0.0.1:3000`），无需任何 Cookie 解析配置。
+多台 MCP Server 挂在同一域名（ALB）后方时，Web UI 会话是单机内存态，需要保证同一浏览器的请求落到持有会话的机器。转发由 `SessionAffinityProxyMiddleware`（`src/core/session_affinity_proxy.py`）在**应用层**完成，nginx 只做哑代理（`proxy_pass http://127.0.0.1:3000`），无需任何 Cookie 解析配置。
 
-**模式一：单节点钉死（推荐，`privateIp` 已配置）**
+**默认行为（不配置 `privateIp`）：** 登录在收到请求的节点本地处理，Cookie 写入 `session_id.<本机IP>`；后续请求落到其他节点时，中间件解析 Cookie 后缀 IP，经 httpx 转发到持有会话的节点。节点 IP 通过 UDP 路由探测（连接 8.8.8.8）自动获得。
 
-所有节点配置相同的 `privateIp`（如 `"10.0.0.13"`），三台机器配置文件完全一致：
+**可选配置 `privateIp`：** 所有节点填同一个 IP 时，该节点成为 Web UI 固定入口——其余节点的 `/mcp/web` 请求（含登录）一律转发过去，session 只存在于这一台机器，各节点配置文件完全一致；`/mcp` 协议不受影响，仍由各节点本地处理。节点通过比对自身探测 IP 与 `privateIp` 判断自己是不是入口节点；探测失败时假定自己就是入口节点（单机/离线行为不变）。
 
-```
-本机探测 IP == privateIp  → 本节点就是目标 → 本地处理所有 /mcp/web
-本机探测 IP != privateIp  → 全部 /mcp/web 请求（含登录）经 httpx 转发到目标节点
-                              /mcp（MCP 协议）不受影响，本机处理
-```
-
-- 登录也被转发，**session 只存在于目标节点**，不存在会话分裂
-- 转发带内部跳转头 `x-doris-session-affinity-hop`，防止配置错误导致转发循环（二次跳转直接 502）
-- 目标节点宕机只影响 Web UI，MCP 协议照常
-
-**模式二：Cookie 后缀亲和（`privateIp` 未配置，默认）**
-
-```
-登录（任意节点，本地处理）
-  → Cookie 写入 "session_id.<本机IP>"
-  → 后续请求落在其他节点 → 中间件解析 Cookie 后缀 IP → httpx 转发到该节点
-```
-
-- 节点身份通过 UDP 路由探测（连接 8.8.8.8）自动获得，失败回落 127.0.0.1（单机可用，多机必须显式配置）
-- 会话分布在多个节点，单节点重启只影响其上的会话
-
-**转发实现要点：** 共享 httpx.AsyncClient（禁 Set-Cookie、不跟随重定向、trust_env=False）；流式转发请求/响应体；上游超时/不可达时清除 Cookie 并 303 回登录页（登录始终可本地处理，不会死循环）。
+**转发实现要点：** 共享 httpx.AsyncClient（禁 Set-Cookie、不跟随重定向、trust_env=False）；流式转发请求/响应体；内部跳转头 `x-doris-session-affinity-hop` 防止转发循环；上游超时/不可达时清除 Cookie 并 303 回登录页。
 
 ---
 
@@ -540,7 +519,7 @@ doris-mcp-client semantic status
 | 内嵌 HTML 模板 | Web UI 无外部 CDN 依赖，单文件部署，支持代理/VPN 访问。 |
 | Python 3.10 standalone 构建 | 通过 `python-build-standalone` 自包含分发。运行时不需要系统 Python。 |
 | 审计日志（定时轮转） | 每次 Tool 调用记录 client_id、参数、耗时、成功/失败。按天轮转，保留 30 天。敏感信息（Cookie、密码、token）脱敏后落盘。 |
-| Web UI 会话亲和在应用层 | `SessionAffinityProxyMiddleware` 按 Cookie 后缀 IP 或 `privateIp` 钉死转发，nginx 保持哑代理。多机部署不需要修改 nginx 配置，扩缩容节点零运维。 |
+| Web UI 会话亲和在应用层 | `SessionAffinityProxyMiddleware` 按 Cookie 后缀 IP（或 `privateIp` 指定入口）转发，nginx 保持哑代理。多机部署不需要修改 nginx 配置，扩缩容节点零运维。 |
 | example 部署异步化 | 部署可能超过代理 60s 空闲超时。后台任务 + 状态轮询，前端永不见 504 HTML。 |
 
 ---
@@ -653,7 +632,7 @@ doris-mcp-server/
 │   │   ├── request_logger.py    # 请求日志中间件
 │   │   ├── pagination.py        # 游标分页
 │   │   ├── sensitive_mask.py    # 敏感数据脱敏
-│   │   └── session_affinity_proxy.py # Web UI 会话亲和/单节点钉死 ASGI 反向代理（§8.3）
+│   │   └── session_affinity_proxy.py # Web UI 会话亲和 ASGI 反向代理（§8.3）
 │   ├── store/                   # 工作区存储模块
 │   │   ├── store.py             # DorisStore：每工作区 active/staging 表
 │   │   ├── watcher.py           # MultiWorkspaceWatcher：轮询、重载、验证、提交

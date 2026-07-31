@@ -85,19 +85,16 @@ nohup ./start-mcp-server.sh > /dev/null 2>&1 &
 
 ### 多机部署（同一域名多节点）
 
-多台 MCP Server 挂在 ALB 后方时，只需在**所有节点**的 `mcp-server.toml` 中配置同一个 `privateIp`：
+多节点部署时，Web UI 会话默认按 Cookie 后缀 IP 自动亲和转发，无需任何配置。
+
+如需固定 Web UI 入口节点，在**所有节点**的 `mcp-server.toml` 填同一个 `privateIp` 即可：
 
 ```toml
 [server]
-privateIp = "10.0.0.13"   # 所有节点填同一个 IP：指定的 Web UI 节点
+privateIp = "10.0.0.13"   # 可选：所有节点填同一个 IP，/mcp/web 请求（含登录）固定转发到该节点
 ```
 
-效果：
-
-- 所有 `/mcp/web` 请求（含登录）自动转发到该节点，session 只存在一台机器
-- `/mcp`（MCP 协议）无状态，各节点本地处理
-- 三台机器配置文件完全一致，nginx 只做哑代理，无需任何 Cookie 解析
-- 不配置 `privateIp` 时退化为按 Cookie 后缀的会话亲和（各节点自动探测本机 IP）
+三台机器配置文件完全一致；session 只存在于该节点；`/mcp`（MCP 协议）无状态，仍由各节点本地处理。nginx 只做哑代理，无需 Cookie 解析。
 
 详见 [DESIGN.md](DESIGN.md) §8.3。
 
