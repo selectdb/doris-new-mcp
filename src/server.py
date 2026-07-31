@@ -724,7 +724,7 @@ def create_server(
                         "message": "Engine init failed — check model YAML (e.g., missing agg_time_dimension)",
                     }
             else:
-                files = ws.store.list_files()
+                files = await asyncio.to_thread(ws.store.list_files)
                 if not files:
                     ws_statuses[ws_name] = {
                         "status": "no_models",
@@ -955,7 +955,7 @@ def create_server(
         if multi_watcher.has_workspace(name):
             return _JSONResponse({"success": False, "error": {"code": "CONFLICT", "message": f"Workspace '{name}' already exists"}}, status_code=409)
         # Initialize immediately in watcher so it appears in workspace list
-        multi_watcher._init_workspace(name)
+        await asyncio.to_thread(multi_watcher._init_workspace, name)
         logger.info(f"Workspace '{name}' created by {client_id}")
         return _JSONResponse({"success": True, "data": {"workspace": name, "message": f"Workspace '{name}' created."}})
 
@@ -977,7 +977,7 @@ def create_server(
         
         # DROP only semantic model tables (active_store + staging_store), NOT data tables
         from store.store import DorisStore
-        DorisStore.drop_workspace_tables(name)
+        await asyncio.to_thread(DorisStore.drop_workspace_tables, name)
         # Immediately remove from watcher and clear table cache so it disappears from UI
         multi_watcher._workspaces.pop(name, None)
         multi_watcher.router.rebuild(multi_watcher._workspaces)
@@ -1005,7 +1005,7 @@ def create_server(
             )
         
         ws = _form_str(form, "workspace", "example")
-        st = _get_store(ws)
+        st = await asyncio.to_thread(_get_store, ws)
 
         files_staged = 0
         for _, upload in form.multi_items():
@@ -1030,7 +1030,7 @@ def create_server(
                     {"success": False, "error": {"code": "BAD_REQUEST", "message": f"Invalid YAML in {filename}: {e}"}},
                     status_code=400,
                 )
-            st.staging_upsert(filename, text)
+            await asyncio.to_thread(st.staging_upsert, filename, text)
             files_staged += 1
 
         if files_staged == 0:
@@ -1061,8 +1061,8 @@ def create_server(
             return err
         
         ws = _get_workspace_from_request(request)
-        st = _get_store(ws)
-        files = st.list_files()
+        st = await asyncio.to_thread(_get_store, ws)
+        files = await asyncio.to_thread(st.list_files)
         
         if not files:
             return _JSONResponse(
@@ -1073,7 +1073,7 @@ def create_server(
         buf = _io.BytesIO()
         with _tarfile.open(fileobj=buf, mode="w:gz") as tar:
             for f in files:
-                data = st.get_file(f["filename"])
+                data = await asyncio.to_thread(st.get_file, f["filename"])
                 if data and data.get("content"):
                     info = _tarfile.TarInfo(name=f["filename"])
                     content_bytes = data["content"].encode("utf-8")
@@ -1221,15 +1221,15 @@ def create_server(
         if err:
             return err
         ws = _get_workspace_from_request(request)
-        st = _get_store(ws)
+        st = await asyncio.to_thread(_get_store, ws)
 
         flash = ""
         staged_q = request.query_params.get("staged")
         if staged_q:
             flash = f'<div class="flash flash-ok">📦 {staged_q} file(s) staged.</div>'
 
-        files = st.list_files()
-        staging = st.staging_list()
+        files = await asyncio.to_thread(st.list_files)
+        staging = await asyncio.to_thread(st.staging_list)
         staging_map = {s["filename"]: s for s in staging}
 
         # ---- Active panel ----
@@ -1297,7 +1297,7 @@ def create_server(
             metrics = ws_obj.manifest.list_metrics()
             status_text = f"healthy · {len(metrics)} metrics"
             status_color = "color:#1e8e3e;"
-        elif ws_obj and ws_obj.store.list_files():
+        elif ws_obj and await asyncio.to_thread(ws_obj.store.list_files):
             status_text = "not ready"
             status_color = "color:#e37400;"
         else:
@@ -1526,12 +1526,12 @@ function wsAction(url,label) {
 
         # Check cross-file dependencies before staging the delete
         from tools.dependency import check_delete_dependencies
-        store = _get_store(ws)
-        file_info = store.get_file(filename)
+        store = await asyncio.to_thread(_get_store, ws)
+        file_info = await asyncio.to_thread(store.get_file, filename)
         if file_info and file_info.get("content"):
             active_files = {}
-            for f in store.list_files():
-                f_info = store.get_file(f["filename"])
+            for f in await asyncio.to_thread(store.list_files):
+                f_info = await asyncio.to_thread(store.get_file, f["filename"])
                 if f_info and f_info.get("content"):
                     active_files[f["filename"]] = f_info["content"]
             errors = check_delete_dependencies(filename, file_info["content"], active_files)
@@ -1540,7 +1540,7 @@ function wsAction(url,label) {
                 body = "<h2>Cannot Delete</h2><ul>" + "".join(f"<li>{e}</li>" for e in errors) + "</ul>"
                 return _HTML(_render_page(body, client_id, True, ws), status_code=409)
 
-        action = store.staging_delete(filename)
+        action = await asyncio.to_thread(store.staging_delete, filename)
         return _Redirect(f"/mcp/web/models?workspace={ws}&staged=1", status_code=303)
 
     @mcp.custom_route("/mcp/web/{filename:path}/save", methods=["POST"])
@@ -1557,7 +1557,8 @@ function wsAction(url,label) {
         try:
             form = await request.form()
             content = _form_str(form, "content")
-            _get_store(ws).staging_upsert(filename, content)
+            st = await asyncio.to_thread(_get_store, ws)
+            await asyncio.to_thread(st.staging_upsert, filename, content)
             return _Redirect(f"/mcp/web/models?workspace={ws}", status_code=303)
         except Exception as e:
             body = f'<div class="flash flash-err">Save failed: {e}</div>'
@@ -1582,7 +1583,8 @@ function wsAction(url,label) {
                 return _HTML(html, status_code=400)
             if not filename.endswith((".yml", ".yaml")):
                 filename += ".yaml"
-            _get_store(ws).staging_upsert(filename, content)
+            st = await asyncio.to_thread(_get_store, ws)
+            await asyncio.to_thread(st.staging_upsert, filename, content)
             return _Redirect(f"/mcp/web/models?workspace={ws}", status_code=303)
         except Exception as e:
             body = f'<div class="flash flash-err">Create failed: {e}</div>'
@@ -1625,7 +1627,8 @@ function wsAction(url,label) {
             except UnicodeDecodeError:
                 skipped += 1
                 continue
-            _get_store(ws).staging_upsert(filename, text)
+            st = await asyncio.to_thread(_get_store, ws)
+            await asyncio.to_thread(st.staging_upsert, filename, text)
             uploaded += 1
 
         logger.info(f"WebUI upload: {uploaded} files staged, {skipped} skipped by {client_id}")
@@ -1639,7 +1642,8 @@ function wsAction(url,label) {
         if err:
             return err
         ws = _get_workspace_from_request(request)
-        files = _get_store(ws).staging_list()
+        st = await asyncio.to_thread(_get_store, ws)
+        files = await asyncio.to_thread(st.staging_list)
         return _JSONResponse({"success": True, "data": files})
 
     @mcp.custom_route("/mcp/web/staging/validate", methods=["POST"])
@@ -1652,7 +1656,7 @@ function wsAction(url,label) {
         except Exception:
             body = {}
         ws = body.get("workspace", "example")
-        valid, msg, details = multi_watcher.validate_staging(ws)
+        valid, msg, details = await asyncio.to_thread(multi_watcher.validate_staging, ws)
         log_tool_call("staging_validate", client_id=client_id,
                       params={"valid": valid, "workspace": ws}, success=valid, duration_ms=0)
         return _JSONResponse({"success": True, "data": {"valid": valid, "message": msg, "details": details}})
@@ -1667,7 +1671,7 @@ function wsAction(url,label) {
         except Exception:
             body = {}
         ws = body.get("workspace", "example")
-        ok, msg = multi_watcher.commit_staging(ws)
+        ok, msg = await asyncio.to_thread(multi_watcher.commit_staging, ws)
         log_tool_call("staging_commit", client_id=client_id,
                       params={"workspace": ws}, success=ok, duration_ms=0)
         return _JSONResponse({"success": ok, "data": {"message": msg}})
@@ -1682,7 +1686,8 @@ function wsAction(url,label) {
         except Exception:
             body = {}
         ws = body.get("workspace", "example")
-        _get_store(ws).staging_discard()
+        st = await asyncio.to_thread(_get_store, ws)
+        await asyncio.to_thread(st.staging_discard)
         log_tool_call("staging_discard", client_id=client_id,
                       params={"workspace": ws}, success=True, duration_ms=0)
         return _JSONResponse({"success": True, "data": {"message": "Staging discarded"}})
@@ -1696,7 +1701,8 @@ function wsAction(url,label) {
         if err:
             return err
         ws = _get_workspace_from_request(request)
-        files = _get_store(ws).list_files()
+        st = await asyncio.to_thread(_get_store, ws)
+        files = await asyncio.to_thread(st.list_files)
         return _JSONResponse({"success": True, "data": files})
 
     @mcp.custom_route("/mcp/web/semantic/files/{filename:path}", methods=["GET"])
@@ -1706,7 +1712,8 @@ function wsAction(url,label) {
             return err
         ws = _get_workspace_from_request(request)
         filename = request.path_params["filename"]
-        data = _get_store(ws).get_file(filename)
+        st = await asyncio.to_thread(_get_store, ws)
+        data = await asyncio.to_thread(st.get_file, filename)
         if data is None:
             return _JSONResponse(
                 {"success": False, "error": {"code": "NOT_FOUND", "message": f"File not found: {filename}"}},
@@ -1736,7 +1743,8 @@ function wsAction(url,label) {
         if not filename.endswith((".yml", ".yaml")):
             filename += ".yaml"
         ws = body.get("workspace", "example")
-        _get_store(ws).staging_upsert(filename, content)
+        st = await asyncio.to_thread(_get_store, ws)
+        await asyncio.to_thread(st.staging_upsert, filename, content)
         log_tool_call("semantic_save", client_id=client_id,
                       params={"filename": filename}, success=True, duration_ms=0)
         return _JSONResponse({"success": True, "data": {"filename": filename, "staged": True}})
@@ -1751,12 +1759,12 @@ function wsAction(url,label) {
 
         # Check cross-file dependencies before staging the delete
         from tools.dependency import check_delete_dependencies
-        store = _get_store(ws)
-        file_info = store.get_file(filename)
+        store = await asyncio.to_thread(_get_store, ws)
+        file_info = await asyncio.to_thread(store.get_file, filename)
         if file_info and file_info.get("content"):
             active_files = {}
-            for f in store.list_files():
-                f_info = store.get_file(f["filename"])
+            for f in await asyncio.to_thread(store.list_files):
+                f_info = await asyncio.to_thread(store.get_file, f["filename"])
                 if f_info and f_info.get("content"):
                     active_files[f["filename"]] = f_info["content"]
             errors = check_delete_dependencies(filename, file_info["content"], active_files)
@@ -1768,7 +1776,7 @@ function wsAction(url,label) {
                     status_code=409,
                 )
 
-        action = store.staging_delete(filename)
+        action = await asyncio.to_thread(store.staging_delete, filename)
         log_tool_call("semantic_delete", client_id=client_id,
                       params={"filename": filename, "action": action}, success=True, duration_ms=0)
         return _JSONResponse({"success": True, "data": {"filename": filename, "action": action}})
@@ -1782,7 +1790,9 @@ function wsAction(url,label) {
             return err
 
         filename = request.path_params.get("filename", "")
-        ws = _get_workspace_from_request(request); file_data = _get_store(ws).get_file(filename)
+        ws = _get_workspace_from_request(request)
+        st = await asyncio.to_thread(_get_store, ws)
+        file_data = await asyncio.to_thread(st.get_file, filename)
         if file_data is None:
             body = f'<div class="flash flash-err">File not found: {filename}</div>'
         else:
