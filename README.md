@@ -71,7 +71,7 @@ dist/
 
 ```bash
 # 解压即用
-tar xzf dist/doris-mcp-server-1.3.1-linux-x64.tar.gz
+tar xzf dist/doris-mcp-server-{version}-linux-x64.tar.gz
 cd doris-mcp-server
 
 # 确保同机 Doris FE 运行在 127.0.0.1:9030
@@ -83,13 +83,31 @@ cd doris-mcp-server
 nohup ./start-mcp-server.sh > /dev/null 2>&1 &
 ```
 
+### 多机部署（同一域名多节点）
+
+多节点部署时，Web UI 会话默认按 Cookie 后缀 IP 自动亲和转发，无需任何配置。
+
+如需固定 Web UI 入口节点，在**所有节点**的 `mcp-server.toml` 填同一个 `privateIp` 即可：
+
+```toml
+[server]
+privateIp = "10.0.0.13"   # 可选：所有节点填同一个 IP，/mcp/web 请求（含登录）固定转发到该节点
+```
+
+三台机器配置文件完全一致；session 只存在于该节点；`/mcp`（MCP 协议）无状态，仍由各节点本地处理。nginx 只做哑代理，无需 Cookie 解析。
+
+详见 [DESIGN.md](DESIGN.md) §8.3。
+
 ## 运行测试
 
 ```bash
-# 冒烟测试（快速，约 5 秒）
+# 离线单元测试（无需 MCP Server）
+bash test/run_all_tests.sh --offline
+
+# 冒烟测试（快速）
 bash test/run_all_tests.sh --smoke
 
-# 全部测试（42 用例）
+# 全部测试（需本地 MCP Server）
 bash test/run_all_tests.sh
 ```
 

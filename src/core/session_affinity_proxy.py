@@ -149,8 +149,8 @@ class SessionAffinityProxy:
 
         headers = scope.get("headers", [])
 
-        # Pinned-web-node mode: every Web UI request (login included) goes to
-        # the designated node, so sessions exist on exactly one machine.
+        # privateIp configured: every Web UI request (login included) goes
+        # to the configured node, so sessions exist on exactly one machine.
         if self.force_target_ip is not None and self.force_target_ip != self.local_ip:
             if any(name.lower() == _INTERNAL_HOP_HEADER for name, _ in headers):
                 await self._send_error(send, 502, b"Bad Gateway")

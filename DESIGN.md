@@ -13,7 +13,7 @@
                               │
                               ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     FastMCP 3.3.1 服务器                         │
+│                     FastMCP 3.x 服务器                         │
 │                                                                  │
 │  ┌───────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
 │  │  10 个 Tool   │  │  Web UI      │  │  REST API              │ │
@@ -23,9 +23,9 @@
 │  ┌───────┴─────────────────┴───────────────────────┴────────────┐ │
 │  │                       认证层                                  │ │
 │  │  MCP:  Bearer username:password → CredentialVerifier → Doris │ │
-│  │  Web:  会话 Cookie（24h TTL, httponly）                      │ │
-│  │  缓存: 10 分钟内存凭证缓存                                    │ │
-│  │  连接: 每用户独立 aiomysql 连接池                             │ │
+│  │  Web:  会话 Cookie <session_id>.<节点IP>（24h TTL, httponly）│ │
+│  │  缓存: 10 分钟内存凭证缓存；登录防爆破锁定（5 次/5 分钟）    │ │
+│  │  连接: 每用户独立 aiomysql 连接池（无共享 admin 池）          │ │
 │  └───────────────────────────┬──────────────────────────────────┘ │
 │                              │                                    │
 │  ┌───────────────────────────┴──────────────────────────────────┐ │
@@ -57,16 +57,21 @@
 main()
   ├─ 解析参数 (--config-dir, --env-file)
   ├─ AppConfig.load(mcp-server.toml)   ← TOML 配置文件，支持 ${VAR} 环境变量插值
+  ├─ resolve_machine_ip(privateIp)     ← Web UI 节点身份（固定入口 / Cookie 亲和后缀）
   └─ create_server()
-       ├─ Admin 登录后部署 example     ← 默认关闭；seed_example=true 时自动
-       ├─ MultiWorkspaceWatcher.start() ← 后台轮询线程（60s 间隔）
-       ├─ ConnectionPool (admin)       ← aiomysql 连接池，min=0, max=10
-       ├─ CredentialVerifier           ← Bearer token → Doris 凭据验证
+       ├─ MultiWorkspaceWatcher         ← 懒初始化：首个已认证请求时才扫描工作区
+       ├─ PoolManager                   ← 每用户 aiomysql 连接池工厂（无共享 admin 池）
+       ├─ CredentialVerifier            ← Bearer token → Doris 凭据验证（10 分钟缓存）
        ├─ 注册 10 个 MCP Tool
        ├─ 注册 Web UI 路由 (/mcp/web/*)
        └─ 注册 REST API 路由 (/mcp/web/semantic/*, /mcp/web/staging/*)
            ↓
-mcp.run(transport="streamable-http", stateless_http=True, port=3000)
+mcp.run(transport="streamable-http", stateless_http=True, port=3000,
+        middleware=[
+          RequestLoggerMiddleware,        ← 请求/响应日志（敏感信息脱敏）
+          SessionAffinityProxyMiddleware, ← Web UI 会话亲和（见 §8.3）
+          CharsetMiddleware,              ← 字符集处理
+        ])
 ```
 
 ### 1.2 关闭
@@ -86,6 +91,9 @@ mcp_host = "0.0.0.0"            # 监听地址
 mcp_port = 3000                 # HTTP 端口
 fe_port = 9030                  # Doris FE MySQL 端口（同机 127.0.0.1）
 seed_example = false            # 默认不部署；Admin 可在 WebUI 手动部署
+admin_users = ["admin"]         # Admin 用户列表（WebUI 管理操作、example 部署）
+# privateIp = "10.0.0.13"      # 可选：所有节点填同一 IP，/mcp/web 请求（含登录）
+                                # 固定转发到该节点；不配置则按 Cookie 后缀亲和。见 §8.3
 
 [logging]
 level = "info"                  # debug|info|warning|error
@@ -98,6 +106,7 @@ pool_min_size = 0
 pool_max_size = 10
 pool_idle_timeout_seconds = 300
 query_timeout_seconds = 600
+# db_whitelist = ["dw", "system_mcp"]   # 可选：库白名单，限制可访问的数据库
 query_max_rows = 10000           # 默认最大返回行数
 ```
 
@@ -190,15 +199,19 @@ Authorization: Bearer username:password
 ```
 GET  /mcp/web/login  → 渲染登录表单
 POST /mcp/web/login  → 验证 Doris 凭据 → 设置 "doris_mcp_session" Cookie
-                       （24h TTL, httponly, samesite=lax）
+                       格式: <session_id>.<节点IP>（24h TTL, httponly, samesite=lax）
 GET  /mcp/web/logout → 清除会话和 Cookie
 ```
+
+- **Cookie 后缀**：`<节点IP>` 是会话亲和路由依据（见 §8.3），由 `privateIp` 配置或自动探测决定
+- **防爆破**：同一用户名连续失败 5 次锁定 5 分钟；锁定状态表现为"密码错误"，不泄露锁定事实
+- **内存上限**：会话字典硬上限 1000 条，超出时逐出最旧会话；登录时顺带清理过期会话
 
 ### 4.3 权限模型
 
 | 角色 | 判定方式 | 权限 |
 |------|----------|------|
-| **admin** | `user == "admin"` | 全部：上传/拉取/验证/提交/丢弃模型、创建/删除工作区、执行任意 SQL |
+| **admin** | 用户名在 `server.admin_users` 配置列表中（默认 `["admin"]`） | 全部：上传/拉取/验证/提交/丢弃模型、创建/删除工作区、部署/删除 example、执行任意 SQL |
 | **已认证用户** | 有效 Bearer token，通过 `_check_semantic_access()` | 只读：查看模型、列出/查询指标、执行 SQL（只读校验） |
 | **未认证** | 无 token | 拒绝（401 或跳转登录页） |
 
@@ -392,8 +405,9 @@ ConnectionPool
 
 | 池 | 用户 | 最小/最大 | 用途 |
 |----|------|-----------|------|
-| Admin 池 | `admin` | 0/10 | 语义文件存储、工作区管理、健康检查 |
 | 每用户池 | `<认证用户>` | 0/10 | 以用户身份执行 SQL 查询 |
+
+**无共享 admin 池：** 所有 Doris 连接都使用请求自带的凭据（Bearer token 或 Web UI 会话中的用户名密码），请求间通过 `PoolManager` 复用同用户的池。空闲连接按 `pool_idle_timeout_seconds` 回收，失效凭据自动清除缓存并重建。
 
 ---
 
@@ -431,6 +445,18 @@ ConnectionPool
 | `/mcp/web/staging/discard` | POST | Admin | 丢弃待提交变更 |
 | `/mcp/web/workspace/create` | POST | Admin | 创建工作区 |
 | `/mcp/web/workspace/delete` | POST | Admin | 删除工作区（DROP 存储表） |
+| `/mcp/web/example/deployment` | POST | Admin (WebUI session) | 启动 example 部署/删除后台任务，立即返回 |
+| `/mcp/web/example/deployment/status` | GET | Admin (WebUI session) | 轮询后台任务状态（idle/running/success/failed） |
+
+### 8.3 多机部署与会话亲和
+
+多台 MCP Server 挂在同一域名（ALB）后方时，Web UI 会话是单机内存态，需要保证同一浏览器的请求落到持有会话的机器。转发由 `SessionAffinityProxyMiddleware`（`src/core/session_affinity_proxy.py`）在**应用层**完成，nginx 只做哑代理（`proxy_pass http://127.0.0.1:3000`），无需任何 Cookie 解析配置。
+
+**默认行为（不配置 `privateIp`）：** 登录在收到请求的节点本地处理，Cookie 写入 `session_id.<本机IP>`；后续请求落到其他节点时，中间件解析 Cookie 后缀 IP，经 httpx 转发到持有会话的节点。节点 IP 通过 UDP 路由探测（连接 8.8.8.8）自动获得。
+
+**可选配置 `privateIp`：** 所有节点填同一个 IP 时，该节点成为 Web UI 固定入口——其余节点的 `/mcp/web` 请求（含登录）一律转发过去，session 只存在于这一台机器，各节点配置文件完全一致；`/mcp` 协议不受影响，仍由各节点本地处理。节点通过比对自身探测 IP 与 `privateIp` 判断自己是不是入口节点；探测失败时假定自己就是入口节点（单机/离线行为不变）。
+
+**转发实现要点：** 共享 httpx.AsyncClient（禁 Set-Cookie、不跟随重定向、trust_env=False）；流式转发请求/响应体；内部跳转头 `x-doris-session-affinity-hop` 防止转发循环；上游超时/不可达时清除 Cookie 并 303 回登录页。
 
 ---
 
@@ -464,7 +490,11 @@ doris-mcp-client semantic status
 ## 10. 示例工作区
 
 默认不部署 example。Admin 可通过 Reload 右侧的专属按钮手动部署或删除；
-若显式设置 `seed_example=true`，Admin 首次登录 WebUI 时自动部署：
+若显式设置 `seed_example=true`，Admin 首次登录 WebUI 时自动部署。
+
+**异步部署：** 部署/删除是长耗时操作（建库建表 + 插数据 + GRANT + 编译模型，可能超过代理/LB 的 60s 空闲超时）。POST `/mcp/web/example/deployment` 只启动后台任务并立即返回，前端每 2s 轮询 GET `.../status` 直至 success/failed，避免同步等待触发 504 HTML 错误页。
+
+**示例数据表：**
 
 | 表 | 行数 | 说明 |
 |----|------|------|
@@ -488,7 +518,9 @@ doris-mcp-client semantic status
 | 每用户连接池 | 每个认证用户获得独立 aiomysql 池，保留 Doris 原生用户级别授权。 |
 | 内嵌 HTML 模板 | Web UI 无外部 CDN 依赖，单文件部署，支持代理/VPN 访问。 |
 | Python 3.10 standalone 构建 | 通过 `python-build-standalone` 自包含分发。运行时不需要系统 Python。 |
-| 审计日志（定时轮转） | 每次 Tool 调用记录 client_id、参数、耗时、成功/失败。按天轮转，保留 30 天。 |
+| 审计日志（定时轮转） | 每次 Tool 调用记录 client_id、参数、耗时、成功/失败。按天轮转，保留 30 天。敏感信息（Cookie、密码、token）脱敏后落盘。 |
+| Web UI 会话亲和在应用层 | `SessionAffinityProxyMiddleware` 按 Cookie 后缀 IP（或 `privateIp` 指定入口）转发，nginx 保持哑代理。多机部署不需要修改 nginx 配置，扩缩容节点零运维。 |
+| example 部署异步化 | 部署可能超过代理 60s 空闲超时。后台任务 + 状态轮询，前端永不见 504 HTML。 |
 
 ---
 
@@ -509,14 +541,34 @@ doris-mcp-client semantic status
 
 ```
 dist/
-└── doris-mcp-server-1.3.1-{platform}.tar.gz    ← python/ + src/ + 配置 + mcp-client/
+└── doris-mcp-server-{version}-{platform}.tar.gz    ← python/ + src/ + 配置 + mcp-client/
 ```
 
-### 12.2 部署
+> 版本号单一事实源是 `pyproject.toml`；`build.sh` 的 `VERSION` 环境变量可覆盖（CI 从 Git tag 注入）。
+> 注意 `cryptography>=45.0.1` 是按目标机 glibc 2.32 兼容性选定的下限，不要随意抬高。
+
+### 12.2 CI 自动发版（`.github/workflows/release.yml`）
+
+| 触发方式 | 行为 |
+|----------|------|
+| PR 合入 main | 自动取最新 `doris-mcp-server-0.2.*` tag，patch +1，打 tag + 构建 + 发 Release |
+| 手动打 tag `doris-mcp-server-x.y.z` | 按 tag 版本号构建并发 Release |
+| Actions 手动触发 | 按输入版本号构建并发 Release |
+
+每次发版产出 linux-x64 和 linux-arm64 两个包（私有仓库无免费 ARM runner，arm64 在 x64 runner 上经 `build.sh` 交叉构建）：
+
+```
+doris-mcp-server-0.2.3-linux-x64.tar.gz
+doris-mcp-server-0.2.3-linux-arm64.tar.gz
+```
+
+两个包解压后顶层目录均为 `doris-mcp-server/`，部署脚本无需改动。
+
+### 12.3 部署
 
 ```bash
 # 1. 解压
-tar xzf doris-mcp-server-1.3.1-linux-x64.tar.gz
+tar xzf doris-mcp-server-{version}-linux-x64.tar.gz
 cd doris-mcp-server
 
 # 2. 配置（可选，默认 localhost:9030 即可）
@@ -533,7 +585,7 @@ nohup ./start-mcp-server.sh > /tmp/doris-mcp.log 2>&1 &   # 后台
 DORIS_MCP_PYTHON=/usr/bin/python3.10 ./start-mcp-server.sh
 ```
 
-### 12.3 验证
+### 12.4 验证
 
 ```bash
 # WebUI
@@ -558,8 +610,10 @@ doris-mcp-server/
 ├── INSTALL.html                 # 安装指南
 ├── doris-mcp-docs.html          # 完整文档（语义模型 + 用户指南）
 ├── DESIGN.md                    # 本文档
+├── .github/workflows/
+│   └── release.yml              # CI：PR 合入自动发版 / tag 发版（x64 + arm64）
 ├── src/
-│   ├── main.py                  # 入口 + FastMCP.run()
+│   ├── main.py                  # 入口 + 中间件栈 + FastMCP.run()
 │   ├── server.py                # 服务工厂、10 个 Tool、Web UI 路由、REST API
 │   ├── auth/                    # 认证模块
 │   │   ├── credential_cache.py  # 10 分钟 TTL 内存缓存
@@ -578,7 +632,7 @@ doris-mcp-server/
 │   │   ├── request_logger.py    # 请求日志中间件
 │   │   ├── pagination.py        # 游标分页
 │   │   ├── sensitive_mask.py    # 敏感数据脱敏
-│   │   └── session_affinity_proxy.py # Web UI 路由的 ASGI 会话亲和反向代理
+│   │   └── session_affinity_proxy.py # Web UI 会话亲和 ASGI 反向代理（§8.3）
 │   ├── store/                   # 工作区存储模块
 │   │   ├── store.py             # DorisStore：每工作区 active/staging 表
 │   │   ├── watcher.py           # MultiWorkspaceWatcher：轮询、重载、验证、提交
