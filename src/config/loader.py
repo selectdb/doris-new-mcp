@@ -61,21 +61,26 @@ class McpConfig:
         if self.log_rotation_when not in _WHEN:
             raise ValueError(f"Invalid rotation_when: '{self.log_rotation_when}'")
 
-        self.seed_example: bool = srv.get("seed_example", True)
+        self.seed_example: bool = srv.get("seed_example", False)
+
+        admin_users = srv.get("admin_users", ["admin"])
+        if not isinstance(admin_users, list) or not all(isinstance(u, str) for u in admin_users):
+            raise ValueError("server.admin_users must be a list of strings")
+        self.admin_users: list[str] = admin_users
 
 
 class ClusterConfig:
     def __init__(self, server: dict, query: dict):
-        self.fe_host: str = "127.0.0.1"
+        self.fe_host: str = server.get("fe_host", "127.0.0.1")
         self.fe_mysql_port: int = server.get("fe_port", 9030)
-        self.user_name: str = "admin"
-        self.user_password: str = ""
+        self.user_name: str = server.get("fe_user", "admin")
+        self.user_password: str = server.get("fe_password", "")
         self.pool_min_size: int = query.get("pool_min_size", 0)
         self.pool_max_size: int = query.get("pool_max_size", 10)
         self.pool_idle_timeout: int = query.get("pool_idle_timeout_seconds", 300)
         self.query_timeout: int = query.get("query_timeout_seconds", 600)
         self.max_rows: int = query.get("query_max_rows", 10000)
-        self.db_whitelist: list[str] = []
+        self.db_whitelist: list[str] = query.get("db_whitelist", []) or []
 
 
 class AppConfig:

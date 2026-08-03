@@ -97,10 +97,11 @@ class SessionAffinityProxy:
     decoder result is trusted by this middleware.  ``target_port`` is local
     configuration, never data taken from the cookie.
 
-    When ``force_target_ip`` is set, **every** ``/mcp/web`` request (login
-    included) is unconditionally forwarded to that node — cookie-based affinity
-    is disabled.  The node whose ``local_ip`` equals ``force_target_ip`` handles
-    requests locally.
+    When ``force_target_ip`` is set and differs from ``local_ip``, **every**
+    ``/mcp/web`` request (login included) is unconditionally forwarded to that
+    node — cookie-based affinity is bypassed.  The node whose ``local_ip``
+    equals ``force_target_ip`` handles requests locally (with normal
+    cookie-affinity rules), so all Web UI sessions live on that one node.
     """
 
     def __init__(
@@ -113,11 +114,13 @@ class SessionAffinityProxy:
         cookie_name: str = "doris_mcp_session",
         client: httpx.AsyncClient | None = None,
         timeout: httpx.TimeoutTypes | None = None,
+        force_target_ip: str | None = None,
     ) -> None:
         self.app = app
         self.decoder = decoder
         self.local_ip = local_ip
         self.target_port = target_port
+        self.force_target_ip = force_target_ip
         self.cookie_name = cookie_name
         self._client = client
         self._owns_client = client is None
@@ -144,12 +147,22 @@ class SessionAffinityProxy:
             await self.app(scope, receive, send)
             return
 
+        headers = scope.get("headers", [])
+
+        # privateIp configured: every Web UI request (login included) goes
+        # to the configured node, so sessions exist on exactly one machine.
+        if self.force_target_ip is not None and self.force_target_ip != self.local_ip:
+            if any(name.lower() == _INTERNAL_HOP_HEADER for name, _ in headers):
+                await self._send_error(send, 502, b"Bad Gateway")
+                return
+            await self._proxy(scope, receive, send, self.force_target_ip)
+            return
+
         # Login must stay local even if a stale cookie identifies another node.
         if path == "/mcp/web/login":
             await self.app(_without_internal_header(scope), receive, send)
             return
 
-        headers = scope.get("headers", [])
         cookie = _cookie_value(headers, self.cookie_name)
         try:
             decoded = self.decoder(cookie) if cookie is not None else None

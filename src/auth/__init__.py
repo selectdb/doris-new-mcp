@@ -6,9 +6,6 @@ Public API:
     - ``AuthResult`` — structured result from tool access check.
     - ``CredentialVerifier`` — username:password credential validator.
     - ``CredentialCache`` — in-memory TTL cache for verified credentials.
-
-Note: auth/provider.py and auth/config.py contain static-token/JWT/OAuth
-infrastructure that is fully implemented but not yet wired into create_server().
 """
 
 from auth.credential_cache import CredentialCache

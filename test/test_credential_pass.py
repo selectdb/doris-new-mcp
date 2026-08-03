@@ -14,8 +14,14 @@ Covers:
 """
 
 import asyncio
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 
 # ══════════════════════════════════════════════════════════════════

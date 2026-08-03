@@ -48,32 +48,6 @@ class SemanticManifest:
         self._metrics = other._metrics
         self._semantic_models = other._semantic_models
 
-    def get_semantic_table_names(self) -> set[str]:
-        """Return all source table names referenced by semantic models.
-
-        Used for detecting semantic conflict when execute_query hits a metric-defined table.
-        """
-        tables: set[str] = set()
-        for sm in self._semantic_models:
-            # Semantic model name often matches the staging model / source table
-            name = sm.get("name", "")
-            if name:
-                tables.add(name.lower())
-            # Also check node_relation if available
-            node_rel = sm.get("node_relation", {})
-            if isinstance(node_rel, dict):
-                alias = node_rel.get("alias", "")
-                if alias:
-                    tables.add(alias.lower())
-                relation_name = node_rel.get("relation_name", "")
-                if relation_name:
-                    tables.add(relation_name.lower())
-        return tables
-
-    def get_metric_names(self) -> set[str]:
-        """Return all metric names as a set."""
-        return {m.get("name", "") for m in self._metrics}
-
     def list_metrics(self) -> list[dict[str, Any]]:
         """Return all metrics with name, description."""
         result = []
@@ -91,6 +65,79 @@ class SemanticManifest:
                 return m
         return None
 
+    def _collect_measure_refs(self, metric_name: str, visited: set[str]) -> set[str]:
+        """Recursively resolve a metric to the names of its underlying measures.
+
+        Handles all metric types:
+        - simple / cumulative: ``type_params.measure`` (or ``type_params.input_measures``)
+        - derived: ``type_params.metrics[]`` → recurses into sub-metrics
+        - ratio: ``type_params.numerator`` / ``denominator`` → recurses into
+          the referenced metrics (a bare name that matches no metric is kept
+          as a measure candidate)
+        - conversion: ``conversion_type_params`` (or flat ``type_params``)
+          ``base_measure`` / ``conversion_measure``, with ``base_metric`` /
+          ``conversion_metric`` resolved recursively
+        - cumulative: ``cumulative_type_params.metric`` → recurses
+
+        *visited* guards against reference cycles (e.g. derived-of-derived
+        loops); metric names already in it are skipped.
+        """
+        refs: set[str] = set()
+        if not metric_name or metric_name in visited:
+            return refs
+        visited.add(metric_name)
+
+        metric = self.get_metric(metric_name)
+        if not metric:
+            return refs
+        type_params = metric.get("type_params", {})
+        if not isinstance(type_params, dict):
+            return refs
+
+        def _name_of(ref: Any) -> str:
+            if isinstance(ref, dict):
+                return ref.get("name", "")
+            return ref if isinstance(ref, str) else ""
+
+        # simple / cumulative metrics
+        name = _name_of(type_params.get("measure"))
+        if name:
+            refs.add(name)
+        # parsed manifests may also carry resolved input measures
+        for input_measure in type_params.get("input_measures") or []:
+            name = _name_of(input_measure)
+            if name:
+                refs.add(name)
+
+        # derived metrics reference other metrics — resolve recursively
+        for sub in type_params.get("metrics") or []:
+            refs |= self._collect_measure_refs(_name_of(sub), visited)
+
+        # ratio metrics reference numerator/denominator metrics
+        for key in ("numerator", "denominator"):
+            name = _name_of(type_params.get(key))
+            if name:
+                refs.add(name)  # harmless if it's a metric name (no measure match)
+                refs |= self._collect_measure_refs(name, visited)
+
+        # conversion metrics: measures and/or metrics, nested or flat
+        for container in (type_params.get("conversion_type_params") or {}, type_params):
+            if not isinstance(container, dict):
+                continue
+            for key in ("base_measure", "conversion_measure"):
+                name = _name_of(container.get(key))
+                if name:
+                    refs.add(name)
+            for key in ("base_metric", "conversion_metric"):
+                refs |= self._collect_measure_refs(_name_of(container.get(key)), visited)
+
+        # cumulative metrics may wrap another metric
+        cum_params = type_params.get("cumulative_type_params") or {}
+        if isinstance(cum_params, dict):
+            refs |= self._collect_measure_refs(_name_of(cum_params.get("metric")), visited)
+
+        return refs
+
     def list_dimensions_for_metric(self, metric_name: str) -> list[dict[str, Any]]:
         """Return dimensions available for a metric.
 
@@ -101,32 +148,9 @@ class SemanticManifest:
         if not metric:
             return []
 
-        # Collect measure references from metric type_params
-        measure_refs = set()
-        type_params = metric.get("type_params", {})
-        if not isinstance(type_params, dict):
-            type_params = {}
-
-        # Handle "measure" field (simple metrics: dict, derived: absent)
-        measure_param = type_params.get("measure")
-        if isinstance(measure_param, dict):
-            measure_refs.add(measure_param.get("name", ""))
-        elif isinstance(measure_param, str):
-            measure_refs.add(measure_param)
-
-        # Handle "metrics" field (derived metrics reference other metrics → resolve recursively)
-        sub_metrics = type_params.get("metrics", [])
-        if isinstance(sub_metrics, list):
-            for sm in sub_metrics:
-                sub_name = sm.get("name", "") if isinstance(sm, dict) else str(sm)
-                sub_metric = self.get_metric(sub_name)
-                if sub_metric:
-                    sub_params = sub_metric.get("type_params", {})
-                    sub_measure = sub_params.get("measure") if isinstance(sub_params, dict) else None
-                    if isinstance(sub_measure, dict):
-                        measure_refs.add(sub_measure.get("name", ""))
-                    elif isinstance(sub_measure, str):
-                        measure_refs.add(sub_measure)
+        # Collect measure references from metric type_params, resolving
+        # derived/ratio/conversion/cumulative chains recursively.
+        measure_refs = self._collect_measure_refs(metric_name, set())
 
         # Find semantic models containing these measures
         dimensions = []
@@ -144,33 +168,3 @@ class SemanticManifest:
                             "description": dim.get("description", ""),
                         })
         return dimensions
-
-    def search(self, keywords: list[str]) -> list[dict[str, Any]]:
-        """Search metrics and dimensions by keyword list (priority order).
-
-        Iterates keywords in order. Returns results from the first keyword
-        that produces any match. Earlier keywords = higher priority.
-        """
-        for keyword in keywords:
-            if not keyword or not keyword.strip():
-                continue
-            kw = keyword.strip().lower()
-            results = []
-
-            for m in self._metrics:
-                name = m.get("name", "")
-                desc = m.get("description") or ""
-                if kw in name.lower() or kw in desc.lower():
-                    results.append({"type": "metric", "name": name, "description": desc})
-
-            for sm in self._semantic_models:
-                for dim in sm.get("dimensions", []):
-                    name = dim.get("name", "")
-                    desc = dim.get("description") or ""
-                    if kw in name.lower() or kw in desc.lower():
-                        results.append({"type": "dimension", "name": name, "description": desc})
-
-            if results:
-                return results
-
-        return []

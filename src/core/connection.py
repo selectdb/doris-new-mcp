@@ -49,6 +49,9 @@ class ConnectionPool:
                 maxsize=self._max_size,
                 connect_timeout=10,
                 autocommit=True,
+                # Recycle connections idle longer than this so a connection
+                # silently dropped by Doris wait_timeout is never reused.
+                pool_recycle=self._cluster.pool_idle_timeout,
             )
             return self._pool
 
@@ -65,13 +68,22 @@ class ConnectionPool:
         _max_rows = max_rows or self._cluster.max_rows
 
         async with pool.acquire() as conn:
-            if database:
-                await conn.select_db(database)
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await asyncio.wait_for(cur.execute(sql), timeout=_timeout)
-                rows = await cur.fetchmany(_max_rows)
-                columns = [d[0] for d in cur.description] if cur.description else []
-                return list(rows), columns
+            try:
+                if database:
+                    await conn.select_db(database)
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await asyncio.wait_for(cur.execute(sql), timeout=_timeout)
+                    rows = await cur.fetchmany(_max_rows)
+                    columns = [d[0] for d in cur.description] if cur.description else []
+                    return list(rows), columns
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                # Timed out or cancelled mid-query: the connection's protocol
+                # state is unknown, so close it — pool.release() discards
+                # closed connections instead of returning them to the pool.
+                # asyncio.TimeoutError is builtin TimeoutError on 3.11+ and
+                # a distinct class on 3.10; both are covered here.
+                conn.close()
+                raise
 
     async def close(self) -> None:
         if self._pool and not self._pool.closed:
