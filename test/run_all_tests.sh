@@ -123,7 +123,7 @@ run_offline_unit_tests() {
     run_python_test "$SCRIPT_DIR/test_sql_validator.py" "SQL 只读校验离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_sensitive_mask.py" "敏感信息脱敏离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_pagination.py" "分页离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_private_ip_config.py" "私网 IP 配置离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_private_ip_config.py" "请求节点 IP 离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_deps.py" "运行时依赖守卫离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_cross_file_deps.py" "跨文件依赖检测离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_credential_pass.py" "凭据透传离线单元测试" || ((FAIL_COUNT += 1))
@@ -134,7 +134,7 @@ run_offline_unit_tests() {
     run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_routing.py" "会话亲和代理路由离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_streaming.py" "会话亲和代理流式离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_relogin.py" "会话亲和代理重登录离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_force_target.py" "会话亲和代理强制目标离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_force_target.py" "会话亲和代理请求地址离线单元测试" || ((FAIL_COUNT += 1))
 }
 
 # ── Main ─────────────────────────────────────────

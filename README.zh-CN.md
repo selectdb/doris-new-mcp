@@ -32,7 +32,7 @@ Doris MCP Server 是一个基于 [Model Context Protocol (MCP)](https://modelcon
 *   **凭据透传**：`Authorization: Bearer <doris用户>:<密码>`——每条 SQL 都以调用者自己的 Doris 身份执行，每用户独立连接池，无共享 admin 凭据。
 *   **Web UI**：Doris 凭据登录，在线编辑/验证/发布模型、管理工作区、一键部署示例，无需本地 YAML 工具链。
 *   **CLI 客户端**：`mcp-client` 支持脚本和 CI/CD 中调用工具、推拉模型文件。
-*   **多机部署就绪**：会话亲和在应用层完成（Cookie 后缀路由，或一行 `privateIp` 固定 Web UI 入口节点），nginx 只做哑代理。
+*   **多机部署就绪**：会话亲和在应用层按 Web UI Cookie 中记录的服务端 IP 完成，nginx 只做哑代理。
 *   **自包含打包**：Release 包自带 Python 3.10 运行时和全部依赖，目标机器无需网络、pip 或系统 Python。
 
 ## 系统要求
@@ -110,7 +110,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 4. 部署示例工作区（Web UI）
 
-1. 浏览器打开 `http://<host>:3000/mcp/web`，用 Doris 凭据登录（需 admin 用户，默认为 `admin`）。
+1. 浏览器打开 `http://<host>:3000/mcp/web`，用 Doris 凭据登录（管理操作使用 `server.fe_user`，默认是 `admin`）。
 2. 点击 **example 部署** 按钮。部署在后台执行，页面自动轮询进度并在完成后跳转。
 3. 回到 AI 客户端提问：*"查询各渠道的订单总额"*——Agent 会发现 `example` 工作区，并调用 `total_amount` 等指标按 `channel` 分组查询。
 
@@ -147,9 +147,7 @@ check_service_health()         ← 2. Doris 连通性 + 工作区状态
 |--------|--------|------|
 | `server.mcp_host` / `server.mcp_port` | `0.0.0.0` / `3000` | HTTP 监听地址 |
 | `server.fe_port` | `9030` | Doris FE MySQL 端口（同机） |
-| `server.admin_users` | `["admin"]` | 可管理模型、部署 example 的用户列表 |
-| `server.seed_example` | `false` | Admin 首次登录时自动部署 example |
-| `server.privateIp` | 未设置 | 可选。所有节点填同一个 IP，将该节点固定为 Web UI 入口，全部 `/mcp/web` 请求（含登录）转发到该节点 |
+| `server.fe_user` | `admin` | 可管理模型、部署 example 的 Doris 用户 |
 | `query.db_whitelist` | `[]` | 可选的库白名单 |
 | `query.query_timeout_seconds` | `600` | SQL 查询超时 |
 | `query.query_max_rows` | `10000` | 单次查询最大返回行数 |
@@ -158,16 +156,7 @@ check_service_health()         ← 2. Doris 连通性 + 工作区状态
 
 ## 多机部署
 
-多台 MCP Server 挂在同一负载均衡后即可工作：Web UI 会话由应用层按 Cookie 后缀 IP 自动转发，nginx 无需任何 Cookie 解析配置。
-
-如需固定 Web UI 入口节点，在所有节点的 `mcp-server.toml` 填同一个 `privateIp`：
-
-```toml
-[server]
-privateIp = "10.0.0.13"   # 所有节点填同一个 IP
-```
-
-此时全部 `/mcp/web` 请求（含登录）都会转发到该节点；`/mcp` MCP 协议流量仍由各节点本地处理。详见 [DESIGN.md](DESIGN.md) §8.3。
+多台 MCP Server 挂在同一负载均衡后无需配置会话亲和。Web UI 首次登录成功时，服务端从当前请求的本地连接中取得实际到达的 IPv4，并以 `session_id.<服务端IP>` 写入 Cookie；后续请求若落到其他节点，中间件会转发到 Cookie 记录的节点。nginx 无需解析 Cookie，`/mcp` MCP 协议流量仍由各节点本地处理。详见 [DESIGN.md](DESIGN.md) §8.3。
 
 ## 源码构建
 

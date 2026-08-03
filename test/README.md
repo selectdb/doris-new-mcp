@@ -11,7 +11,7 @@
 | `test_sql_validator.py` | `core.sql_validator.validate_readonly` 只读 SQL 校验（放行/拦截/多语句/注释绕过/已知前缀行为） |
 | `test_sensitive_mask.py` | `core.sensitive_mask` 密码/token 脱敏 |
 | `test_pagination.py` | `core.pagination` 分页与 token TTL 行为 |
-| `test_private_ip_config.py` | 私网 IP 配置读取与启动装配 |
+| `test_private_ip_config.py` | 请求节点 IP 获取与启动装配 |
 | `test_deps.py` | 运行时依赖守卫（import 真实模块） |
 | `test_cross_file_deps.py` | 删除前跨文件依赖检测 |
 | `test_credential_pass.py` | 请求级凭据透传到 store 层 |
@@ -20,7 +20,7 @@
 | `test_session_affinity_proxy_routing.py` | 会话亲和代理路由 |
 | `test_session_affinity_proxy_streaming.py` | 会话亲和代理流式转发 |
 | `test_session_affinity_proxy_relogin.py` | 会话亲和代理重登录 |
-| `test_session_affinity_proxy_force_target.py` | 会话亲和代理强制目标 |
+| `test_session_affinity_proxy_force_target.py` | 会话亲和代理请求地址路由 |
 
 ### 在线测试（需运行中的 MCP Server + Doris）
 

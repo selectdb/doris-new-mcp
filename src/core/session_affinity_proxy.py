@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from http.cookiejar import CookieJar, DefaultCookiePolicy
@@ -93,15 +94,10 @@ def _cookie_value(headers: list[tuple[bytes, bytes]], cookie_name: str) -> str |
 class SessionAffinityProxy:
     """Route a decoded Web UI session to the process which owns it.
 
-    ``decoder`` is deliberately the only cookie-format dependency: a successful
-    decoder result is trusted by this middleware.  ``target_port`` is local
+    ``decoder`` is deliberately the only cookie-format dependency. The local
+    node address comes from the current ASGI socket; ``local_ip`` is only a
+    fallback for servers which do not expose it. ``target_port`` is local
     configuration, never data taken from the cookie.
-
-    When ``force_target_ip`` is set and differs from ``local_ip``, **every**
-    ``/mcp/web`` request (login included) is unconditionally forwarded to that
-    node — cookie-based affinity is bypassed.  The node whose ``local_ip``
-    equals ``force_target_ip`` handles requests locally (with normal
-    cookie-affinity rules), so all Web UI sessions live on that one node.
     """
 
     def __init__(
@@ -114,13 +110,11 @@ class SessionAffinityProxy:
         cookie_name: str = "doris_mcp_session",
         client: httpx.AsyncClient | None = None,
         timeout: httpx.TimeoutTypes | None = None,
-        force_target_ip: str | None = None,
     ) -> None:
         self.app = app
         self.decoder = decoder
         self.local_ip = local_ip
         self.target_port = target_port
-        self.force_target_ip = force_target_ip
         self.cookie_name = cookie_name
         self._client = client
         self._owns_client = client is None
@@ -149,15 +143,6 @@ class SessionAffinityProxy:
 
         headers = scope.get("headers", [])
 
-        # privateIp configured: every Web UI request (login included) goes
-        # to the configured node, so sessions exist on exactly one machine.
-        if self.force_target_ip is not None and self.force_target_ip != self.local_ip:
-            if any(name.lower() == _INTERNAL_HOP_HEADER for name, _ in headers):
-                await self._send_error(send, 502, b"Bad Gateway")
-                return
-            await self._proxy(scope, receive, send, self.force_target_ip)
-            return
-
         # Login must stay local even if a stale cookie identifies another node.
         if path == "/mcp/web/login":
             await self.app(_without_internal_header(scope), receive, send)
@@ -169,7 +154,7 @@ class SessionAffinityProxy:
         except Exception:  # A decoder rejection is treated exactly as an invalid cookie.
             logger.warning("Session-affinity cookie decoder rejected a cookie")
             decoded = None
-        if decoded is None or decoded[1] == self.local_ip:
+        if decoded is None or decoded[1] == self._local_ip(scope):
             await self.app(_without_internal_header(scope), receive, send)
             return
 
@@ -177,6 +162,17 @@ class SessionAffinityProxy:
             await self._send_error(send, 502, b"Bad Gateway")
             return
         await self._proxy(scope, receive, send, decoded[1])
+
+    def _local_ip(self, scope: dict[str, Any]) -> str:
+        server = scope.get("server")
+        if isinstance(server, (tuple, list)) and server:
+            try:
+                parsed_ip = ipaddress.ip_address(server[0])
+            except (TypeError, ValueError):
+                parsed_ip = None
+            if isinstance(parsed_ip, ipaddress.IPv4Address) and not parsed_ip.is_unspecified:
+                return parsed_ip.compressed
+        return self.local_ip
 
     async def _run_lifespan(
         self,

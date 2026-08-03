@@ -32,7 +32,7 @@ Doris MCP Server is a backend service that exposes [Apache Doris](https://doris.
 *   **Credential Pass-Through**: `Authorization: Bearer <doris-user>:<password>` — every query runs under the caller's own Doris identity with per-user connection pools. No shared admin credentials.
 *   **Web UI**: Login with Doris credentials to edit/validate/publish models, manage workspaces, and deploy the bundled example — no YAML tooling required.
 *   **CLI Client**: `mcp-client` for calling tools and pushing/pulling model files from scripts and CI/CD.
-*   **Multi-Node Ready**: Session affinity is handled in-app (cookie-suffix routing, or a fixed Web UI entry node via one `privateIp` line); nginx stays a plain reverse proxy.
+*   **Multi-Node Ready**: Session affinity is handled in-app using the server IP recorded in the Web UI cookie; nginx stays a plain reverse proxy.
 *   **Self-Contained Packaging**: Release tarballs bundle a Python 3.10 runtime and all dependencies. No network, no pip, no system Python required on target machines.
 
 ## System Requirements
@@ -110,7 +110,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 4. Deploy the example workspace (Web UI)
 
-1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (an admin user — `admin` by default).
+1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (management operations require `server.fe_user`, which defaults to `admin`).
 2. Click the **example deploy** button. Deployment runs in the background; the page polls progress and redirects when done.
 3. Back in your AI client, ask: *"查询各渠道的订单总额"* — the agent will discover the `example` workspace and query metrics like `total_amount` grouped by `channel`.
 
@@ -147,9 +147,7 @@ check_service_health()         ← 2. Doris connectivity + workspace status
 |-----|---------|-------------|
 | `server.mcp_host` / `server.mcp_port` | `0.0.0.0` / `3000` | HTTP listen address |
 | `server.fe_port` | `9030` | Doris FE MySQL port (same host) |
-| `server.admin_users` | `["admin"]` | Users allowed to manage models / deploy the example |
-| `server.seed_example` | `false` | Auto-deploy the example on first admin login |
-| `server.privateIp` | *(unset)* | Optional. Set the same IP on every node to make it the fixed Web UI entry; all `/mcp/web` requests (login included) are forwarded there |
+| `server.fe_user` | `admin` | Doris user allowed to manage models and deploy the example |
 | `query.db_whitelist` | `[]` | Optional database allow-list |
 | `query.query_timeout_seconds` | `600` | SQL query timeout |
 | `query.query_max_rows` | `10000` | Max rows per query |
@@ -158,16 +156,7 @@ All values support `${ENV_VAR}` interpolation.
 
 ## Multi-Node Deployment
 
-Multiple server nodes behind one load balancer work out of the box: Web UI sessions are routed in-app by the session cookie's IP suffix — nginx needs no cookie parsing.
-
-To pin the Web UI to a single entry node, set the same `privateIp` in every node's `mcp-server.toml`:
-
-```toml
-[server]
-privateIp = "10.0.0.13"   # identical on all nodes
-```
-
-All `/mcp/web` requests (login included) are then forwarded to that node; `/mcp` MCP traffic stays node-local. See [DESIGN.md](DESIGN.md) §8.3 for details.
+Multiple server nodes behind one load balancer work without an affinity configuration. On the first successful Web UI login, the server reads the local IPv4 address on which the request arrived and writes it into the session cookie as `session_id.<server-ip>`. If a later request reaches another node, the middleware forwards it to the node recorded in the cookie. nginx needs no cookie parsing, and `/mcp` traffic stays node-local. See [DESIGN.md](DESIGN.md) §8.3 for details.
 
 ## Building from Source
 
