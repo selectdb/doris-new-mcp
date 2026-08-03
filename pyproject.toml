@@ -1,6 +1,6 @@
 [project]
 name = "doris-new-mcp"
-version = "1.3.1"
+version = "0.2.6"
 description = "Apache Doris MCP Server — Doris query service over the MCP protocol, with a built-in MetricFlow semantic layer"
 readme = "README.md"
 requires-python = ">=3.10"
