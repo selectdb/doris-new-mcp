@@ -310,7 +310,7 @@ build() {
 
     _ensure_python "$platform_label" "$platform_url"
 
-    rm -rf "$DIST_DIR"
+    # 不清空整个 dist/，让多个平台的包可以共存
     mkdir -p "$DIST_DIR"
 
     _pack "doris-mcp-server" "$platform_label" \
