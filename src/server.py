@@ -42,6 +42,7 @@ from tools.query import execute_query as _execute_query
 logger = logging.getLogger("doris_new_mcp")
 
 _WEBUI_SESSION_COOKIE = "doris_mcp_session"
+_ADMIN_USER = "admin"
 
 # RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
 _IPV4_RFC1918_NETS = (
@@ -87,6 +88,36 @@ def _decode_webui_session_cookie(cookie_value: str | None) -> tuple[str, str] | 
     return session_id, parsed_ip.compressed
 
 
+def _request_server_ip(request: "Request", fallback_ip: str) -> str:
+    """Return the IPv4 address on which this request reached the server."""
+    server = request.scope.get("server")
+    if isinstance(server, (tuple, list)) and server:
+        try:
+            parsed_ip = ipaddress.ip_address(server[0])
+        except (TypeError, ValueError):
+            parsed_ip = None
+        if isinstance(parsed_ip, ipaddress.IPv4Address) and not parsed_ip.is_unspecified:
+            return parsed_ip.compressed
+    return fallback_ip
+
+
+def _webui_private_ip(request: "Request", listen_host: str, fallback_ip: str) -> str:
+    """Choose the IPv4 stored in a newly-issued Web UI session cookie."""
+    if listen_host != "0.0.0.0":
+        try:
+            parsed_ip = ipaddress.ip_address(listen_host)
+        except ValueError as exc:
+            raise ValueError(
+                "server.mcp_host must be an IPv4 address for Web UI session affinity"
+            ) from exc
+        if not isinstance(parsed_ip, ipaddress.IPv4Address) or parsed_ip.is_unspecified:
+            raise ValueError(
+                "server.mcp_host must be a concrete IPv4 address or 0.0.0.0"
+            )
+        return parsed_ip.compressed
+    return _request_server_ip(request, fallback_ip)
+
+
 def get_machine_ip() -> str | None:
     """Best-effort local IPv4 detection via the UDP route to a public endpoint.
 
@@ -105,51 +136,23 @@ def get_machine_ip() -> str | None:
         sock.close()
 
 
-def resolve_machine_ip(configured_private_ip: str | None) -> str:
-    """Resolve this node's IPv4 identity for session affinity.
-
-    Preference order: configured ``privateIp`` → UDP auto-detection →
-    ``127.0.0.1`` fallback.  Non-RFC-1918 addresses (e.g. public IPs) are
-    accepted with a warning instead of being rejected.
-    """
-    if configured_private_ip is None:
-        candidate = ""
-    elif isinstance(configured_private_ip, str):
-        candidate = configured_private_ip.strip()
-    else:
-        raise ValueError("Configured private IP must be a string or null")
-
-    if candidate:
-        # A configured value is operator input — fail fast on garbage.
-        source = "Configured private IP"
+def resolve_machine_ip() -> str:
+    """Best-effort fallback IPv4 used when a request has no local address."""
+    parsed_ip = None
+    detected = get_machine_ip()
+    if detected:
         try:
-            parsed_ip = ipaddress.ip_address(candidate)
-        except ValueError as exc:
-            raise ValueError(f"{source} must be an IPv4 address: {candidate!r}") from exc
-        if not isinstance(parsed_ip, ipaddress.IPv4Address):
-            raise ValueError(f"{source} must be an IPv4 address: {candidate!r}")
-    else:
-        # Auto-detection is best-effort: an unusable result must not abort
-        # startup.  127.0.0.1 is harmless for single-node deployments (the
-        # affinity cookie always points back at this node); multi-node
-        # deployments must configure ``privateIp`` so nodes can be told apart.
-        parsed_ip = None
-        detected = get_machine_ip()
-        if detected:
-            try:
-                probed = ipaddress.ip_address(detected)
-                if isinstance(probed, ipaddress.IPv4Address):
-                    parsed_ip = probed
-            except ValueError:
-                pass
-        if parsed_ip is None:
-            logger.warning(
-                "Could not auto-detect the machine IP (offline host, no default "
-                "route, or IPv6-only stack); falling back to 127.0.0.1. This is "
-                "fine for single-node deployments; multi-node deployments must "
-                "set server.privateIp in mcp-server.toml."
-            )
-            return "127.0.0.1"
+            probed = ipaddress.ip_address(detected)
+            if isinstance(probed, ipaddress.IPv4Address):
+                parsed_ip = probed
+        except ValueError:
+            pass
+    if parsed_ip is None:
+        logger.warning(
+            "Could not auto-detect the machine IP; falling back to 127.0.0.1. "
+            "Web UI cookies will use the request's local IPv4 when available."
+        )
+        return "127.0.0.1"
 
     if not _is_rfc1918_ipv4(parsed_ip):
         logger.warning(
@@ -164,7 +167,6 @@ def create_server(
     config_dir: str | None = None,
     env_file: str | None = None,
     machine_ip: str | None = None,
-    webui_ip: str | None = None,
     config: "AppConfig | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server."""
@@ -187,10 +189,7 @@ def create_server(
     _ws_root.mkdir(parents=True, exist_ok=True)
 
     # Lazy initialization is deferred until credentials are available.
-    # Automatic example deployment is intentionally Admin-only because it
-    # creates databases/tables and grants privileges.
     _watcher_initialized = False
-    _example_auto_seed_done = False
     _example_lock = asyncio.Lock()
     # Background example deploy/delete job state — the POST endpoint returns
     # immediately and the frontend polls /example/deployment/status, so a
@@ -210,7 +209,7 @@ def create_server(
 
     async def _deploy_example(user: str, password: str) -> bool:
         """Deploy example data/models with verified Admin credentials."""
-        nonlocal _watcher_initialized, _example_auto_seed_done
+        nonlocal _watcher_initialized
         from store.seed import seed_all, set_doris_port as seed_set_port
         from store.store import set_request_credentials as _set_creds
 
@@ -251,12 +250,10 @@ def create_server(
             except Exception as exc:
                 logger.warning("Example deployed, but GRANT SELECT_PRIV failed: %s", exc)
 
-            _example_auto_seed_done = True
             return performed
 
     async def _delete_example(user: str, password: str) -> None:
         """Delete example deployment and detach it from the global router."""
-        nonlocal _example_auto_seed_done
         from store.seed import delete_example
         from store.store import DorisStore, set_request_credentials as _set_creds
 
@@ -301,9 +298,6 @@ def create_server(
         except Exception as exc:
             logger.exception("Example deployment switch failed")
             _example_job.update(status="failed", message=str(exc))
-            # Prevent seed_example=true from immediately undoing a manual delete.
-            # It remains the default again after a process restart.
-            _example_auto_seed_done = True
 
     async def _ensure_initialized(user: str, password: str) -> None:
         """Initialize workspaces once authenticated credentials are available."""
@@ -530,13 +524,9 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    # Node identity: used for local Doris connections and as the
-    # session-affinity local IP.  Prefers the caller-provided value, then
-    # the configured ``privateIp``, then auto-detection (with fallback).
-    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip(cfg.mcp.private_ip)
-    # Web UI IP written into session cookies; defaults to the node identity
-    # (cookie-affinity mode).
-    _WEBUI_IP = webui_ip if webui_ip is not None else _MACHINE_IP
+    # Fallback node identity for Doris connections and requests whose ASGI
+    # scope does not expose a usable local IPv4 address.
+    _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip()
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql
@@ -551,7 +541,7 @@ def create_server(
             )
             conn.close()
             _record_login_success(user)
-            return True, (user in cfg.mcp.admin_users)
+            return True, (user == _ADMIN_USER)
         except Exception:
             _record_login_failure(user)
             return False, False
@@ -577,7 +567,7 @@ def create_server(
         if session and session["server_ip"] == server_ip:
             if time.time() - session["created_at"] < _SESSION_TTL:
                 client_id = session["doris_user"]
-                is_admin = (client_id in cfg.mcp.admin_users)
+                is_admin = (client_id == _ADMIN_USER)
                 if require_admin and not is_admin:
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
@@ -657,7 +647,7 @@ def create_server(
                 },
                 status_code=401,
             )
-        # is_admin was resolved against cfg.mcp.admin_users at login time.
+        # The Doris admin username is fixed; its password remains request-scoped.
         if not session.get("is_admin"):
             return None, _JSONResponse(
                 {
@@ -1305,26 +1295,21 @@ def create_server(
         # Create session (any authenticated Doris user can log in)
         _prune_webui_sessions()
         session_id = _secrets.token_urlsafe(32)
-        session_cookie_value = _encode_webui_session_cookie(session_id, _WEBUI_IP)
+        private_ip = _webui_private_ip(request, cfg.mcp.host, _MACHINE_IP)
+        session_cookie_value = _encode_webui_session_cookie(session_id, private_ip)
         _webui_sessions[session_id] = {
             "doris_user": user,
             "doris_password": password,
-            "server_ip": _WEBUI_IP,
+            "server_ip": private_ip,
             "created_at": time.time(),
             "is_admin": is_admin,
         }
-        logger.info(f"WebUI login: user='{user}', session={session_id[:8]}...")
-
-        # seed_example is the startup default for the same WebUI switch.
-        # Wait for a verified Admin login so its in-memory password can be used.
-        if is_admin and cfg.mcp.seed_example and not _example_auto_seed_done:
-            try:
-                await _deploy_example(user, password)
-                logger.info("Example deployment checked after Admin WebUI login")
-            except Exception:
-                logger.exception(
-                    "Automatic example deployment failed; Admin can retry in WebUI"
-                )
+        logger.info(
+            "WebUI login: user='%s', session=%s..., private_ip=%s",
+            user,
+            session_id[:8],
+            private_ip,
+        )
 
         resp = _R("/mcp/web", status_code=303)
         # Mark the cookie Secure when the request arrived over HTTPS —

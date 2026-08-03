@@ -43,14 +43,6 @@ class McpConfig:
         self.host: str = srv.get("mcp_host", "0.0.0.0")
         self.port: int = srv.get("mcp_port", 3000)
 
-        # `privateIp` is the documented key; retain `private_ip` for legacy configs.
-        private_ip = srv.get("privateIp", srv.get("private_ip", ""))
-        if private_ip is None:
-            private_ip = ""
-        if not isinstance(private_ip, str):
-            raise ValueError("server.privateIp must be a string or null")
-        self.private_ip: str = private_ip.strip()
-
         log = data.get("logging", {})
         self.log_level: str = log.get("level", "info")
         self.audit_log_path: str = log.get("audit_log", "./logs/audit.log")
@@ -61,20 +53,11 @@ class McpConfig:
         if self.log_rotation_when not in _WHEN:
             raise ValueError(f"Invalid rotation_when: '{self.log_rotation_when}'")
 
-        self.seed_example: bool = srv.get("seed_example", False)
-
-        admin_users = srv.get("admin_users", ["admin"])
-        if not isinstance(admin_users, list) or not all(isinstance(u, str) for u in admin_users):
-            raise ValueError("server.admin_users must be a list of strings")
-        self.admin_users: list[str] = admin_users
-
 
 class ClusterConfig:
     def __init__(self, server: dict, query: dict):
         self.fe_host: str = server.get("fe_host", "127.0.0.1")
         self.fe_mysql_port: int = server.get("fe_port", 9030)
-        self.user_name: str = server.get("fe_user", "admin")
-        self.user_password: str = server.get("fe_password", "")
         self.pool_min_size: int = query.get("pool_min_size", 0)
         self.pool_max_size: int = query.get("pool_max_size", 10)
         self.pool_idle_timeout: int = query.get("pool_idle_timeout_seconds", 300)
