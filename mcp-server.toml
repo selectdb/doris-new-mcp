@@ -13,8 +13,6 @@ mcp_host = "0.0.0.0"              # HTTP 监听地址
 mcp_port = 3000                   # HTTP 监听端口
 fe_port = 9030                    # Doris FE MySQL 端口（同机 127.0.0.1）
 fe_host = "127.0.0.1"             # Doris FE 主机地址（同机部署保持 127.0.0.1）
-fe_user = "admin"                 # Doris FE 管理员用户名
-fe_password = ""                  # Doris FE 管理员密码，建议用 ${ENV_VAR} 环境变量注入
 
 # ---------------------------------------------------------------------------
 # 日志

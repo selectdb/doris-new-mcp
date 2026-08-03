@@ -42,6 +42,7 @@ from tools.query import execute_query as _execute_query
 logger = logging.getLogger("doris_new_mcp")
 
 _WEBUI_SESSION_COOKIE = "doris_mcp_session"
+_ADMIN_USER = "admin"
 
 # RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
 _IPV4_RFC1918_NETS = (
@@ -523,7 +524,7 @@ def create_server(
             )
             conn.close()
             _record_login_success(user)
-            return True, (user == cc.user_name)
+            return True, (user == _ADMIN_USER)
         except Exception:
             _record_login_failure(user)
             return False, False
@@ -549,7 +550,7 @@ def create_server(
         if session and session["server_ip"] == server_ip:
             if time.time() - session["created_at"] < _SESSION_TTL:
                 client_id = session["doris_user"]
-                is_admin = (client_id == cc.user_name)
+                is_admin = (client_id == _ADMIN_USER)
                 if require_admin and not is_admin:
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
@@ -629,7 +630,7 @@ def create_server(
                 },
                 status_code=401,
             )
-        # is_admin was resolved from server.fe_user at login.
+        # The Doris admin username is fixed; its password remains request-scoped.
         if not session.get("is_admin"):
             return None, _JSONResponse(
                 {

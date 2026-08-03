@@ -14,21 +14,27 @@ if str(_SRC) not in sys.path:
 
 import main as app_main  # noqa: E402
 import server  # noqa: E402
-from config.loader import McpConfig  # noqa: E402
+from config.loader import ClusterConfig, McpConfig  # noqa: E402
 
 
 class RemovedConfigTests(unittest.TestCase):
     def test_removed_settings_are_not_exposed(self) -> None:
-        config = McpConfig({
+        config_data = {
             "server": {
                 "privateIp": "10.0.0.13",
                 "seed_example": True,
                 "admin_users": ["root"],
+                "fe_user": "root",
+                "fe_password": "secret",
             }
-        })
+        }
+        config = McpConfig(config_data)
         self.assertFalse(hasattr(config, "private_ip"))
         self.assertFalse(hasattr(config, "seed_example"))
         self.assertFalse(hasattr(config, "admin_users"))
+        cluster = ClusterConfig(config_data["server"], {})
+        self.assertFalse(hasattr(cluster, "user_name"))
+        self.assertFalse(hasattr(cluster, "user_password"))
 
 
 class RequestServerIpTests(unittest.TestCase):

@@ -110,7 +110,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 4. Deploy the example workspace (Web UI)
 
-1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (management operations require `server.fe_user`, which defaults to `admin`).
+1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (management operations require the Doris `admin` user).
 2. Click the **example deploy** button. Deployment runs in the background; the page polls progress and redirects when done.
 3. Back in your AI client, ask: *"查询各渠道的订单总额"* — the agent will discover the `example` workspace and query metrics like `total_amount` grouped by `channel`.
 
@@ -147,7 +147,6 @@ check_service_health()         ← 2. Doris connectivity + workspace status
 |-----|---------|-------------|
 | `server.mcp_host` / `server.mcp_port` | `0.0.0.0` / `3000` | HTTP listen address |
 | `server.fe_port` | `9030` | Doris FE MySQL port (same host) |
-| `server.fe_user` | `admin` | Doris user allowed to manage models and deploy the example |
 | `query.db_whitelist` | `[]` | Optional database allow-list |
 | `query.query_timeout_seconds` | `600` | SQL query timeout |
 | `query.query_max_rows` | `10000` | Max rows per query |

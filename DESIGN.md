@@ -207,7 +207,7 @@ GET  /mcp/web/logout → 清除会话和 Cookie
 
 | 角色 | 判定方式 | 权限 |
 |------|----------|------|
-| **admin** | Doris 用户名与 `server.fe_user` 相同（默认 `admin`） | 全部：上传/拉取/验证/提交/丢弃模型、创建/删除工作区、部署/删除 example、执行任意 SQL |
+| **admin** | Doris 用户名固定为 `admin` | 全部：上传/拉取/验证/提交/丢弃模型、创建/删除工作区、部署/删除 example、执行任意 SQL |
 | **已认证用户** | 有效 Bearer token，通过 `_check_semantic_access()` | 只读：查看模型、列出/查询指标、执行 SQL（只读校验） |
 | **未认证** | 无 token | 拒绝（401 或跳转登录页） |
 

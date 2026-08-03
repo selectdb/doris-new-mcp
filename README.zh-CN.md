@@ -110,7 +110,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 4. 部署示例工作区（Web UI）
 
-1. 浏览器打开 `http://<host>:3000/mcp/web`，用 Doris 凭据登录（管理操作使用 `server.fe_user`，默认是 `admin`）。
+1. 浏览器打开 `http://<host>:3000/mcp/web`，用 Doris 凭据登录（管理操作固定使用 Doris `admin` 用户）。
 2. 点击 **example 部署** 按钮。部署在后台执行，页面自动轮询进度并在完成后跳转。
 3. 回到 AI 客户端提问：*"查询各渠道的订单总额"*——Agent 会发现 `example` 工作区，并调用 `total_amount` 等指标按 `channel` 分组查询。
 
@@ -147,7 +147,6 @@ check_service_health()         ← 2. Doris 连通性 + 工作区状态
 |--------|--------|------|
 | `server.mcp_host` / `server.mcp_port` | `0.0.0.0` / `3000` | HTTP 监听地址 |
 | `server.fe_port` | `9030` | Doris FE MySQL 端口（同机） |
-| `server.fe_user` | `admin` | 可管理模型、部署 example 的 Doris 用户 |
 | `query.db_whitelist` | `[]` | 可选的库白名单 |
 | `query.query_timeout_seconds` | `600` | SQL 查询超时 |
 | `query.query_max_rows` | `10000` | 单次查询最大返回行数 |
