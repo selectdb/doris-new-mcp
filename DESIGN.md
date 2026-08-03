@@ -199,7 +199,7 @@ POST /mcp/web/login  → 验证 Doris 凭据 → 设置 "doris_mcp_session" Cook
 GET  /mcp/web/logout → 清除会话和 Cookie
 ```
 
-- **Cookie 后缀**：`<节点IP>` 是会话亲和路由依据（见 §8.3），登录时从当前请求的 ASGI 本地 socket 获取
+- **Cookie 后缀**：`<节点IP>` 是会话亲和路由依据（见 §8.3）；具体 `mcp_host` 优先，监听 `0.0.0.0` 时从当前请求的 ASGI 本地 socket 获取
 - **防爆破**：同一用户名连续失败 5 次锁定 5 分钟；锁定状态表现为"密码错误"，不泄露锁定事实
 - **内存上限**：会话字典硬上限 1000 条，超出时逐出最旧会话；登录时顺带清理过期会话
 
@@ -448,7 +448,7 @@ ConnectionPool
 
 多台 MCP Server 挂在同一域名（ALB）后方时，Web UI 会话是单机内存态，需要保证同一浏览器的请求落到持有会话的机器。转发由 `SessionAffinityProxyMiddleware`（`src/core/session_affinity_proxy.py`）在**应用层**完成，nginx 只做哑代理（`proxy_pass http://127.0.0.1:3000`），无需任何 Cookie 解析配置。
 
-**节点地址获取：** 登录在收到请求的节点本地处理。首次登录成功时，从 ASGI `scope["server"]` 取得请求实际到达的本地 IPv4，并写入 `session_id.<节点IP>` Cookie；不信任客户端可修改的 `Host` 或 `X-Forwarded-*`。ASGI 未提供可用 IPv4 时，才回退到启动阶段的 UDP 路由探测结果。
+**节点地址获取：** 登录在收到请求的节点本地处理。首次登录成功时，若 `server.mcp_host` 不是 `0.0.0.0`，直接将该具体监听 IPv4 写入 `session_id.<节点IP>` Cookie；监听 `0.0.0.0` 时，从 ASGI `scope["server"]` 取得请求实际到达的本地 IPv4。不信任客户端可修改的 `Host` 或 `X-Forwarded-*`；ASGI 未提供可用 IPv4 时，才回退到启动阶段的 UDP 路由探测结果。
 
 **后续路由：** 请求落到其他节点时，中间件解析 Cookie 后缀 IP，经 httpx 转发到持有会话的节点；落到 Cookie 所指节点时本地处理。`/mcp` 协议不受影响，仍由各节点本地处理。
 

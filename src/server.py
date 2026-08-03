@@ -101,6 +101,23 @@ def _request_server_ip(request: "Request", fallback_ip: str) -> str:
     return fallback_ip
 
 
+def _webui_private_ip(request: "Request", listen_host: str, fallback_ip: str) -> str:
+    """Choose the IPv4 stored in a newly-issued Web UI session cookie."""
+    if listen_host != "0.0.0.0":
+        try:
+            parsed_ip = ipaddress.ip_address(listen_host)
+        except ValueError as exc:
+            raise ValueError(
+                "server.mcp_host must be an IPv4 address for Web UI session affinity"
+            ) from exc
+        if not isinstance(parsed_ip, ipaddress.IPv4Address) or parsed_ip.is_unspecified:
+            raise ValueError(
+                "server.mcp_host must be a concrete IPv4 address or 0.0.0.0"
+            )
+        return parsed_ip.compressed
+    return _request_server_ip(request, fallback_ip)
+
+
 def get_machine_ip() -> str | None:
     """Best-effort local IPv4 detection via the UDP route to a public endpoint.
 
@@ -1278,7 +1295,7 @@ def create_server(
         # Create session (any authenticated Doris user can log in)
         _prune_webui_sessions()
         session_id = _secrets.token_urlsafe(32)
-        private_ip = _request_server_ip(request, _MACHINE_IP)
+        private_ip = _webui_private_ip(request, cfg.mcp.host, _MACHINE_IP)
         session_cookie_value = _encode_webui_session_cookie(session_id, private_ip)
         _webui_sessions[session_id] = {
             "doris_user": user,

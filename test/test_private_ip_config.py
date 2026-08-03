@@ -38,6 +38,26 @@ class RemovedConfigTests(unittest.TestCase):
 
 
 class RequestServerIpTests(unittest.TestCase):
+    def test_specific_listen_ip_takes_precedence_over_request_socket(self) -> None:
+        request = SimpleNamespace(scope={"server": ("10.23.45.67", 3000)})
+        self.assertEqual(
+            server._webui_private_ip(request, "192.168.10.8", "10.0.0.1"),
+            "192.168.10.8",
+        )
+
+    def test_wildcard_listen_ip_uses_request_socket(self) -> None:
+        request = SimpleNamespace(scope={"server": ("10.23.45.67", 3000)})
+        self.assertEqual(
+            server._webui_private_ip(request, "0.0.0.0", "10.0.0.1"),
+            "10.23.45.67",
+        )
+
+    def test_non_ipv4_specific_listen_host_is_rejected(self) -> None:
+        request = SimpleNamespace(scope={"server": ("10.23.45.67", 3000)})
+        for listen_host in ("localhost", "::1"):
+            with self.subTest(listen_host=listen_host), self.assertRaises(ValueError):
+                server._webui_private_ip(request, listen_host, "10.0.0.1")
+
     def test_uses_asgi_local_socket_ip(self) -> None:
         request = SimpleNamespace(
             scope={"server": ("10.23.45.67", 3000)},

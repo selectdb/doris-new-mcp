@@ -155,7 +155,7 @@ All values support `${ENV_VAR}` interpolation.
 
 ## Multi-Node Deployment
 
-Multiple server nodes behind one load balancer work without an affinity configuration. On the first successful Web UI login, the server reads the local IPv4 address on which the request arrived and writes it into the session cookie as `session_id.<server-ip>`. If a later request reaches another node, the middleware forwards it to the node recorded in the cookie. nginx needs no cookie parsing, and `/mcp` traffic stays node-local. See [DESIGN.md](DESIGN.md) §8.3 for details.
+Multiple server nodes behind one load balancer work without an affinity configuration. On the first successful Web UI login, a concrete `server.mcp_host` is written directly into the session cookie; when listening on `0.0.0.0`, the server instead reads the local IPv4 address on which the request arrived. The cookie format is `session_id.<server-ip>`. If a later request reaches another node, the middleware forwards it to the node recorded in the cookie. nginx needs no cookie parsing, and `/mcp` traffic stays node-local. See [DESIGN.md](DESIGN.md) §8.3 for details.
 
 ## Building from Source
 

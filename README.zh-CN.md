@@ -155,7 +155,7 @@ check_service_health()         ← 2. Doris 连通性 + 工作区状态
 
 ## 多机部署
 
-多台 MCP Server 挂在同一负载均衡后无需配置会话亲和。Web UI 首次登录成功时，服务端从当前请求的本地连接中取得实际到达的 IPv4，并以 `session_id.<服务端IP>` 写入 Cookie；后续请求若落到其他节点，中间件会转发到 Cookie 记录的节点。nginx 无需解析 Cookie，`/mcp` MCP 协议流量仍由各节点本地处理。详见 [DESIGN.md](DESIGN.md) §8.3。
+多台 MCP Server 挂在同一负载均衡后无需配置会话亲和。Web UI 首次登录成功时，如果 `server.mcp_host` 是具体 IPv4，就直接将该地址写入 Cookie；监听 `0.0.0.0` 时，才从当前请求的本地连接中取得实际到达的 IPv4。Cookie 格式为 `session_id.<服务端IP>`；后续请求若落到其他节点，中间件会转发到 Cookie 记录的节点。nginx 无需解析 Cookie，`/mcp` MCP 协议流量仍由各节点本地处理。详见 [DESIGN.md](DESIGN.md) §8.3。
 
 ## 源码构建
 
