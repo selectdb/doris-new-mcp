@@ -1,9 +1,11 @@
 # =============================================================================
 # Release — 构建 linux x64 / arm64 并发布 GitHub Release
 #
-#   触发方式（均为手动，PR 合入不再自动发版）:
-#     1. 手动打 tag:  git tag doris-mcp-server-0.2.5 && git push origin doris-mcp-server-0.2.5
-#     2. Actions 页面手动触发（需填版本号）
+#   触发方式:
+#     1. PR 合入 main 后自动发版，版本号在最新 0.2.x tag 的 patch 上 +1
+#        （如最新 tag 是 doris-mcp-server-0.2.6 → 发布 0.2.7）
+#     2. 手动打 tag:  git tag doris-mcp-server-0.2.7 && git push origin doris-mcp-server-0.2.7
+#     3. Actions 页面手动触发（需填版本号）
 #
 #   产物:  doris-mcp-server-<version>-linux_x64.tar.gz
 #         doris-mcp-server-<version>-linux_arm64.tar.gz
@@ -16,28 +18,48 @@
 name: Release
 
 on:
+  pull_request:
+    types: [closed]
+    branches: [main]
   push:
     tags: ["doris-mcp-server-*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号（如 0.2.5，不带前缀）"
+        description: "版本号（如 0.2.7，不带前缀）"
         required: true
 
 jobs:
   # ── 计算本次发布的版本号 ─────────────────────────────────────────────
   version:
+    # PR close 事件只在真正合入时继续；version 跳过后 build/release 也会跳过
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Resolve version
         id: ver
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             V="${{ inputs.version }}"
-          else
+          elif [ "${{ github.event_name }}" = "push" ]; then
             V="${GITHUB_REF_NAME#doris-mcp-server-}"
+          else
+            # PR 合入 main：在最新 doris-mcp-server-0.2.x tag 的 patch 上 +1
+            git fetch origin --tags --force >/dev/null 2>&1 || true
+            LATEST=$(git tag -l 'doris-mcp-server-0.2.*' | sed 's/doris-mcp-server-//' | sort -V | tail -n1)
+            if [ -z "$LATEST" ]; then
+              LATEST="0.2.2"
+            fi
+            V="0.2.$((${LATEST##*.} + 1))"
+            echo "Latest tag version: $LATEST → next: $V"
+            if git rev-parse "doris-mcp-server-$V" >/dev/null 2>&1; then
+              echo "::error::Tag doris-mcp-server-$V already exists"
+              exit 1
+            fi
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
