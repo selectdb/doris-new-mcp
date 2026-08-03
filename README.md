@@ -48,7 +48,7 @@ Doris MCP Server is a backend service that exposes [Apache Doris](https://doris.
 Download the latest release from [Releases](../../releases):
 
 ```bash
-tar xzf doris-mcp-server-<version>-linux-x64.tar.gz
+tar xzf doris-mcp-server-<version>-linux_x64.tar.gz
 cd doris-mcp-server
 ```
 

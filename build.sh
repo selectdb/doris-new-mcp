@@ -273,7 +273,8 @@ _pack() {
     local name="$1"         # doris-mcp-server
     local platform="$2"
     shift 2                 # 剩下的参数是相对 SCRIPT_DIR 的路径
-    local pkg_name="${name}-${VERSION}-${platform}"
+    local pkg_platform="${platform//-/_}"   # linux-x64 → linux_x64
+    local pkg_name="${name}-${VERSION}-${pkg_platform}"
     local outfile="$DIST_DIR/${pkg_name}.tar.gz"
 
     _info "Packing: ${pkg_name}.tar.gz"

@@ -5,8 +5,8 @@
 #     1. 手动打 tag:  git tag doris-mcp-server-0.2.5 && git push origin doris-mcp-server-0.2.5
 #     2. Actions 页面手动触发（需填版本号）
 #
-#   产物:  doris-mcp-server-<version>-linux-x64.tar.gz
-#         doris-mcp-server-<version>-linux-arm64.tar.gz
+#   产物:  doris-mcp-server-<version>-linux_x64.tar.gz
+#         doris-mcp-server-<version>-linux_arm64.tar.gz
 #   解压后顶层目录均为 doris-mcp-server/（与 build.sh 原有约定一致）
 #
 #   说明:  私有仓库无免费 ARM runner，linux-arm64 在 x64 runner 上通过
@@ -61,7 +61,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: doris-mcp-server-${{ needs.version.outputs.version }}-${{ matrix.platform }}
-          path: dist/doris-mcp-server-${{ needs.version.outputs.version }}-${{ matrix.platform }}.tar.gz
+          # build.sh 产物文件名使用下划线平台名（linux_x64 / linux_arm64），
+          # 每个 matrix job 只构建一个平台，dist/ 下仅一个包。
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   # ── 打 tag + 发布 Release ────────────────────────────────────────────
