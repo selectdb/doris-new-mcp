@@ -96,7 +96,11 @@ def _request_server_ip(request: "Request", fallback_ip: str) -> str:
             parsed_ip = ipaddress.ip_address(server[0])
         except (TypeError, ValueError):
             parsed_ip = None
-        if isinstance(parsed_ip, ipaddress.IPv4Address) and not parsed_ip.is_unspecified:
+        if (
+            isinstance(parsed_ip, ipaddress.IPv4Address)
+            and not parsed_ip.is_unspecified
+            and not parsed_ip.is_loopback
+        ):
             return parsed_ip.compressed
     return fallback_ip
 

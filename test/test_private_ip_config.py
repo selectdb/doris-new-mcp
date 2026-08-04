@@ -70,7 +70,13 @@ class RequestServerIpTests(unittest.TestCase):
         self.assertEqual(server._request_server_ip(request, "192.168.1.5"), "192.168.1.5")
 
     def test_falls_back_for_missing_invalid_or_unspecified_address(self) -> None:
-        for scope in ({}, {"server": None}, {"server": ("hostname", 3000)}, {"server": ("0.0.0.0", 3000)}):
+        for scope in (
+            {},
+            {"server": None},
+            {"server": ("hostname", 3000)},
+            {"server": ("0.0.0.0", 3000)},
+            {"server": ("127.0.0.1", 3000)},
+        ):
             with self.subTest(scope=scope):
                 request = SimpleNamespace(scope=scope)
                 self.assertEqual(server._request_server_ip(request, "10.9.8.7"), "10.9.8.7")
