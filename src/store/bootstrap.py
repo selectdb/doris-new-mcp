@@ -35,6 +35,7 @@ from metricflow.semantic_interfaces.parsing.dir_to_model import (
 logger = logging.getLogger("doris_new_mcp.semantic")
 
 _DB_TABLE_RE = re.compile(r'^(\s*)db_table:\s*(.+)$', re.MULTILINE)
+_DORIS_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _normalize_db_table(yaml_text: str) -> tuple[str, bool]:
@@ -348,6 +349,30 @@ def collect_physical_tables(models_dir: Path) -> set[str]:
                 tables.update(_collect_physical_tables_from_doc(doc))
 
     return tables
+
+
+def grant_select_on_physical_tables(tables: set[str]) -> None:
+    """Grant all Doris users SELECT only on the supplied physical tables."""
+    quoted_tables = []
+    for table in sorted(tables):
+        parts = table.split(".")
+        if len(parts) not in (2, 3) or any(
+            not _DORIS_IDENTIFIER_RE.fullmatch(part) for part in parts
+        ):
+            raise ValueError(f"Invalid semantic table name: {table}")
+        quoted_tables.append(".".join(f"`{part}`" for part in parts))
+    if not quoted_tables:
+        raise ValueError("No physical tables found in semantic YAML files")
+
+    from store.store import _get_conn
+
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cursor:
+            for table in quoted_tables:
+                cursor.execute(f"GRANT SELECT_PRIV ON {table} TO '%'")
+    finally:
+        conn.close()
 
 
 def pre_validate_physical(
