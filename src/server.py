@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -43,6 +44,7 @@ logger = logging.getLogger("doris_new_mcp")
 
 _WEBUI_SESSION_COOKIE = "doris_mcp_session"
 _ADMIN_USER = "admin"
+_DORIS_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
 _IPV4_RFC1918_NETS = (
@@ -116,6 +118,22 @@ def _webui_private_ip(request: "Request", listen_host: str, fallback_ip: str) ->
             )
         return parsed_ip.compressed
     return _request_server_ip(request, fallback_ip)
+
+
+def _grant_select_on_semantic_tables(conn: object, tables: set[str]) -> None:
+    """Grant all Doris users SELECT only on the supplied physical tables."""
+    quoted_tables = []
+    for table in sorted(tables):
+        parts = table.split(".")
+        if len(parts) not in (2, 3) or any(not _DORIS_IDENTIFIER_RE.fullmatch(part) for part in parts):
+            raise ValueError(f"Invalid semantic table name: {table}")
+        quoted_tables.append(".".join(f"`{part}`" for part in parts))
+    if not quoted_tables:
+        raise ValueError("No physical tables found in semantic YAML files")
+
+    with conn.cursor() as cursor:
+        for table in quoted_tables:
+            cursor.execute(f"GRANT SELECT_PRIV ON {table} TO '%'")
 
 
 def get_machine_ip() -> str | None:
@@ -228,9 +246,15 @@ def create_server(
                     multi_watcher._init_workspace, "example", first_load=True
                 )
 
-            # Allow all authenticated Doris users to query the sample tables.
+            # Allow all Doris users to query only tables referenced by the semantic YAML.
             try:
                 import pymysql as _pymysql
+                from store.bootstrap import collect_physical_tables
+
+                workspace = multi_watcher.get_workspace("example")
+                if workspace is None:
+                    raise RuntimeError("Example workspace failed to initialize")
+                tables = collect_physical_tables(workspace.models_dir)
                 _conn = await asyncio.to_thread(
                     _pymysql.connect,
                     host="127.0.0.1",
@@ -241,12 +265,10 @@ def create_server(
                     connect_timeout=5,
                 )
                 try:
-                    await asyncio.to_thread(
-                        _conn.cursor().execute, "GRANT SELECT_PRIV ON *.* TO '%'"
-                    )
+                    await asyncio.to_thread(_grant_select_on_semantic_tables, _conn, tables)
                 finally:
                     await asyncio.to_thread(_conn.close)
-                logger.info("GRANT SELECT_PRIV ON *.* TO %s — done", "'%'")
+                logger.info("Granted SELECT_PRIV on %d semantic table(s) to '%%'", len(tables))
             except Exception as exc:
                 logger.warning("Example deployed, but GRANT SELECT_PRIV failed: %s", exc)
 

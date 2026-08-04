@@ -309,6 +309,47 @@ def bootstrap(config_dir: Path, workspace_dir: Path, models_dir: Path | None = N
     return bootstrap_from_yaml(effective_models, workspace_dir)
 
 
+def _collect_physical_tables_from_doc(doc: dict) -> set[str]:
+    tables: set[str] = set()
+    sm = doc.get("semantic_model")
+    if isinstance(sm, dict):
+        table = _resolve_table_ref(sm)
+        if table:
+            tables.add(table)
+
+    tc = doc.get("time_config")
+    if isinstance(tc, dict):
+        for calendar in tc.get("calendar", []) or []:
+            if isinstance(calendar, dict) and isinstance(calendar.get("table"), str):
+                tables.add(calendar["table"])
+
+    pc = doc.get("project_configuration")
+    if isinstance(pc, dict):
+        for spine in pc.get("time_spines", []) or []:
+            if isinstance(spine, dict):
+                table = _resolve_table_ref(spine)
+                if table:
+                    tables.add(table)
+
+    return tables
+
+
+def collect_physical_tables(models_dir: Path) -> set[str]:
+    """Return physical tables referenced by semantic models and time spines."""
+    if not models_dir.exists():
+        raise FileNotFoundError(f"Models directory not found: {models_dir}")
+
+    tables: set[str] = set()
+    yaml_files = sorted(models_dir.rglob("*.yml")) + sorted(models_dir.rglob("*.yaml"))
+    for yaml_file in yaml_files:
+        docs = yaml.safe_load_all(yaml_file.read_text(encoding="utf-8"))
+        for doc in docs:
+            if isinstance(doc, dict):
+                tables.update(_collect_physical_tables_from_doc(doc))
+
+    return tables
+
+
 def pre_validate_physical(
     models_dir: Path,
     db_host: str | None = None,
@@ -378,6 +419,7 @@ def pre_validate_physical(
         for doc in docs:
             if not isinstance(doc, dict):
                 continue
+            table_set.update(_collect_physical_tables_from_doc(doc))
             sm = doc.get("semantic_model")
             if not isinstance(sm, dict):
                 continue
@@ -402,39 +444,6 @@ def pre_validate_physical(
                 expr = dim.get("expr")
                 if expr and not _is_sql_expression(expr):
                     references.append((model_name, "dimension", table, expr))
-
-        # P1-4: Collect calendar/time-spine tables from time_config or project_configuration
-        for doc in docs:
-            if not isinstance(doc, dict):
-                continue
-            # time_config shorthand
-            tc = doc.get("time_config")
-            if isinstance(tc, dict):
-                calendars = tc.get("calendar", [])
-                if isinstance(calendars, list):
-                    for cal in calendars:
-                        if isinstance(cal, dict) and cal.get("table"):
-                            table_set.add(cal["table"])
-            # project_configuration native format
-            pc = doc.get("project_configuration")
-            if isinstance(pc, dict):
-                spines = pc.get("time_spines", [])
-                if isinstance(spines, list):
-                    for spine in spines:
-                        if isinstance(spine, dict):
-                            nr = spine.get("node_relation", {})
-                            if isinstance(nr, dict):
-                                parts = []
-                                if nr.get("database"):
-                                    parts.append(nr["database"])
-                                schema = nr.get("schema_name") or nr.get("schema")
-                                if schema:
-                                    parts.append(schema)
-                                alias = nr.get("alias")
-                                if alias:
-                                    parts.append(alias)
-                                if parts:
-                                    table_set.add(".".join(parts))
 
     # Verify tables and columns via pymysql
     conn = _pymysql.connect(host=host, port=port, user=user, password=password, charset="utf8mb4")
