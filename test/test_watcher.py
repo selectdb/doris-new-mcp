@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -165,6 +166,40 @@ class TestValidateStagingDependencies(unittest.TestCase):
         self.assertEqual(details["phase"], "dependencies")
         self.assertIn("revenue.yaml", " ".join(details["errors"]))
         self.assertIn("total_amount", message)
+
+
+class TestWorkspaceSemanticGrants(unittest.TestCase):
+    def test_commit_grants_every_table_for_a_new_workspace(self):
+        from store.watcher import MultiWorkspaceWatcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            (models_dir / "models.yaml").write_text(
+                """semantic_model:
+  name: orders
+  db_table: sales.orders
+---
+semantic_model:
+  name: users
+  db_table: sales.users
+""",
+                encoding="utf-8",
+            )
+            store = MagicMock()
+            store.staging_commit.return_value.revision = "abc123"
+            store.staging_list.return_value = []
+            watcher = MultiWorkspaceWatcher.__new__(MultiWorkspaceWatcher)
+            watcher._workspaces = {
+                "sales": SimpleNamespace(store=store, models_dir=models_dir)
+            }
+            watcher._staging_validated = {"sales"}
+            watcher.force_reload = MagicMock(return_value=("done", "Reload completed"))
+
+            with patch("store.bootstrap.grant_select_on_physical_tables") as grant:
+                ok, _ = watcher.commit_staging("sales")
+
+            self.assertTrue(ok)
+            grant.assert_called_once_with({"sales.orders", "sales.users"})
 
 
 class TestEnsureFreshCooldown(unittest.TestCase):

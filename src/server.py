@@ -228,25 +228,9 @@ def create_server(
                     multi_watcher._init_workspace, "example", first_load=True
                 )
 
-            # Allow all authenticated Doris users to query the sample tables.
+            # The same grant path is used by every workspace staging commit.
             try:
-                import pymysql as _pymysql
-                _conn = await asyncio.to_thread(
-                    _pymysql.connect,
-                    host="127.0.0.1",
-                    port=cc.fe_mysql_port,
-                    user=user,
-                    password=password,
-                    charset="utf8mb4",
-                    connect_timeout=5,
-                )
-                try:
-                    await asyncio.to_thread(
-                        _conn.cursor().execute, "GRANT SELECT_PRIV ON *.* TO '%'"
-                    )
-                finally:
-                    await asyncio.to_thread(_conn.close)
-                logger.info("GRANT SELECT_PRIV ON *.* TO %s — done", "'%'")
+                await asyncio.to_thread(multi_watcher.grant_workspace_access, "example")
             except Exception as exc:
                 logger.warning("Example deployed, but GRANT SELECT_PRIV failed: %s", exc)
 

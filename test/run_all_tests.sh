@@ -126,6 +126,7 @@ run_offline_unit_tests() {
     run_python_test "$SCRIPT_DIR/test_private_ip_config.py" "请求节点 IP 离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_deps.py" "运行时依赖守卫离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_cross_file_deps.py" "跨文件依赖检测离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_semantic_grant.py" "语义表授权离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_credential_pass.py" "凭据透传离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_watcher.py" "工作区 Watcher 离线单元测试" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_manifest_dims.py" "指标维度提取离线单元测试" || ((FAIL_COUNT += 1))

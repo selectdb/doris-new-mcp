@@ -584,10 +584,32 @@ class MultiWorkspaceWatcher:
         # Clear validation tracking after successful commit
         self._staging_validated.discard(workspace)
 
-        status, _ = self.force_reload(workspace)
+        status, reload_message = self.force_reload(workspace)
+        if status != "done":
+            return False, f"Committed, but reload failed: {reload_message}"
+
+        try:
+            self.grant_workspace_access(workspace)
+        except Exception as e:
+            logger.exception(f"[{workspace}] Semantic table GRANT failed")
+            return False, f"Committed, but GRANT SELECT_PRIV failed: {e}"
+
         remaining = ws.store.staging_list()
         if remaining:
             logger.warning(f"[{workspace}] {len(remaining)} staging items remain after commit")
             return True, f"Committed (revision: {state.revision[:12]}), reload triggered. {len(remaining)} items remain — retry after reload."
 
         return True, f"Committed and reload triggered (revision: {state.revision[:12]})"
+
+    def grant_workspace_access(self, workspace: str) -> int:
+        """Grant all users access to every physical table in one workspace."""
+        ws = self._workspaces.get(workspace)
+        if not ws:
+            raise ValueError(f"Workspace not found: {workspace}")
+
+        from store.bootstrap import collect_physical_tables, grant_select_on_physical_tables
+
+        tables = collect_physical_tables(ws.models_dir)
+        grant_select_on_physical_tables(tables)
+        logger.info(f"[{workspace}] Granted SELECT_PRIV on {len(tables)} semantic table(s) to '%'")
+        return len(tables)
