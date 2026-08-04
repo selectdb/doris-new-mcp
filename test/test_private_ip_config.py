@@ -52,6 +52,13 @@ class RequestServerIpTests(unittest.TestCase):
             "10.23.45.67",
         )
 
+    def test_wildcard_listen_ip_keeps_forwarded_loopback(self) -> None:
+        request = SimpleNamespace(scope={"server": ("127.0.0.1", 3000)})
+        self.assertEqual(
+            server._webui_private_ip(request, "0.0.0.0", "10.0.0.1"),
+            "127.0.0.1",
+        )
+
     def test_non_ipv4_specific_listen_host_is_rejected(self) -> None:
         request = SimpleNamespace(scope={"server": ("10.23.45.67", 3000)})
         for listen_host in ("localhost", "::1"):
@@ -75,7 +82,6 @@ class RequestServerIpTests(unittest.TestCase):
             {"server": None},
             {"server": ("hostname", 3000)},
             {"server": ("0.0.0.0", 3000)},
-            {"server": ("127.0.0.1", 3000)},
         ):
             with self.subTest(scope=scope):
                 request = SimpleNamespace(scope=scope)
