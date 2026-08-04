@@ -369,6 +369,7 @@ def grant_select_on_physical_tables(tables: set[str]) -> None:
     conn = _get_conn()
     try:
         with conn.cursor() as cursor:
+            cursor.execute("GRANT SELECT_PRIV ON `system_mcp`.* TO '%'")
             for table in quoted_tables:
                 cursor.execute(f"GRANT SELECT_PRIV ON {table} TO '%'")
     finally:

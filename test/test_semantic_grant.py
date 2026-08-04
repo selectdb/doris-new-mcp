@@ -63,6 +63,7 @@ project_configuration:
         self.assertEqual(
             statements,
             [
+                "GRANT SELECT_PRIV ON `system_mcp`.* TO '%'",
                 "GRANT SELECT_PRIV ON `dw`.`orders` TO '%'",
                 "GRANT SELECT_PRIV ON `dw`.`users` TO '%'",
             ],
