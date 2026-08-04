@@ -59,6 +59,27 @@ class RequestServerIpTests(unittest.TestCase):
             "127.0.0.1",
         )
 
+    def test_wildcard_listen_ip_prefers_single_configured_private_ip(self) -> None:
+        request = SimpleNamespace(scope={"server": ("127.0.0.1", 3000)})
+        self.assertEqual(
+            server._webui_private_ip(
+                request, "0.0.0.0", "10.0.0.1", ("10.23.45.67",)
+            ),
+            "10.23.45.67",
+        )
+
+    def test_wildcard_listen_ip_uses_forwarding_with_multiple_private_ips(self) -> None:
+        request = SimpleNamespace(scope={"server": ("127.0.0.1", 3000)})
+        self.assertEqual(
+            server._webui_private_ip(
+                request,
+                "0.0.0.0",
+                "10.0.0.1",
+                ("10.23.45.67", "192.168.1.8"),
+            ),
+            "127.0.0.1",
+        )
+
     def test_non_ipv4_specific_listen_host_is_rejected(self) -> None:
         request = SimpleNamespace(scope={"server": ("10.23.45.67", 3000)})
         for listen_host in ("localhost", "::1"):
@@ -100,6 +121,28 @@ class ResolveMachineIpTests(unittest.TestCase):
                 server, "get_machine_ip", return_value=detected_ip
             ):
                 self.assertEqual(server.resolve_machine_ip(), "127.0.0.1")
+
+
+class ConfiguredPrivateIpTests(unittest.TestCase):
+    def test_reads_private_ips_only_from_default_route_interfaces(self) -> None:
+        results = [
+            SimpleNamespace(stdout="default via 10.0.0.1 dev eth0\n"),
+            SimpleNamespace(
+                stdout=(
+                    "2: eth0 inet 10.0.0.13/24 scope global eth0\n"
+                    "3: eth1 inet 192.168.1.9/24 scope global eth1\n"
+                )
+            ),
+        ]
+        with patch("subprocess.run", side_effect=results):
+            self.assertEqual(server.get_configured_private_ips(), ("10.0.0.13",))
+
+    def test_falls_back_when_ip_command_is_unavailable(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertEqual(
+                server.get_configured_private_ips("172.16.8.9"),
+                ("172.16.8.9",),
+            )
 
 
 class MainNodeIpFlowTests(unittest.TestCase):
