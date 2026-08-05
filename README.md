@@ -19,7 +19,7 @@ under the License.
 
 # Doris MCP Server
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
 Doris MCP Server is a backend service that exposes [Apache Doris](https://doris.apache.org/) through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). AI clients (Claude Desktop, Cursor, VS Code, and others) can query Doris data through a governed **semantic metrics layer** built on [MetricFlow](https://github.com/dbt-labs/metricflow), with raw-SQL discovery as a fallback path. It ships with a Web UI for managing semantic models and a CLI client for scripting.
 
@@ -112,7 +112,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (management operations require the Doris `admin` user).
 2. Click the **example deploy** button. Deployment runs in the background; the page polls progress and redirects when done.
-3. Back in your AI client, ask: *"查询各渠道的订单总额"* — the agent will discover the `example` workspace and query metrics like `total_amount` grouped by `channel`.
+3. Back in your AI client, ask: *"What is the total order amount by channel?"* — the agent will discover the `example` workspace and query metrics like `total_amount` grouped by `channel`.
 
 ### 5. Manage semantic models
 
@@ -187,7 +187,7 @@ bash test/run_all_tests.sh             # full suite (needs a local server)
 *   [DESIGN.md](DESIGN.md) — architecture and design decisions
 *   [INSTALL.html](INSTALL.html) — installation guide
 *   [doris-mcp-docs.html](doris-mcp-docs.html) — semantic model reference and user guide
-*   [README.zh-CN.md](README.zh-CN.md) — 中文文档
+*   [README.zh-CN.md](README.zh-CN.md) — Simplified Chinese documentation
 
 ## License
 
