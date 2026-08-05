@@ -113,19 +113,19 @@ _ORDERS_DATA = [
 ]
 
 _USERS_DATA = [
-    (1, "张三", "北京", "VIP",    "2025-06-01"),
-    (2, "李四", "上海", "普通",  "2025-08-15"),
-    (3, "王五", "深圳", "VIP",    "2025-10-01"),
-    (4, "赵六", "杭州", "普通",  "2026-01-10"),
-    (5, "孙七", "广州", "普通",  "2026-02-01"),
+    (1, "Alex Chen", "Beijing", "VIP",      "2025-06-01"),
+    (2, "Bella Li",  "Shanghai", "Standard", "2025-08-15"),
+    (3, "Chris Wang", "Shenzhen", "VIP",    "2025-10-01"),
+    (4, "Dana Zhao", "Hangzhou", "Standard", "2026-01-10"),
+    (5, "Evan Sun",  "Guangzhou", "Standard", "2026-02-01"),
 ]
 
 _PRODUCTS_DATA = [
-    (1, "无线耳机",   "电子", "索尼",   199.00),
-    (2, "机械键盘",   "电子", "罗技",   599.00),
-    (3, "运动鞋",     "服装", "耐克",   299.00),
-    (4, "背包",       "配饰", "新秀丽", 199.00),
-    (5, "智能手表",   "电子", "华为",   899.00),
+    (1, "Wireless Earbuds",   "Electronics", "Sony",      199.00),
+    (2, "Mechanical Keyboard", "Electronics", "Logitech", 599.00),
+    (3, "Running Shoes",      "Apparel",     "Nike",      299.00),
+    (4, "Backpack",           "Accessories", "Samsonite", 199.00),
+    (5, "Smartwatch",         "Electronics", "Huawei",    899.00),
 ]
 
 # ---------------------------------------------------------------------------
@@ -135,8 +135,8 @@ _PRODUCTS_DATA = [
 _ORDERS_YAML = """---
 semantic_model:
   name: orders
-  description: 订单表
-  label: 订单表
+  description: Orders table
+  label: Orders table
 
   db_table: dw.orders
 
@@ -147,29 +147,29 @@ semantic_model:
     - name: order
       type: primary
       expr: order_id
-      label: 订单
+      label: Order
     - name: user
       type: foreign
       expr: user_id
-      label: 用户
+      label: User
 
   measures:
     - name: total_amount
       expr: amount
       agg: sum
-      description: 订单总金额
+      description: Total order amount
     - name: order_count
       expr: order_id
       agg: count_distinct
-      description: 订单数
+      description: Order count
     - name: avg_amount
       expr: amount
       agg: average
-      description: 平均客单价
+      description: Average order value
     - name: unique_users
       expr: user_id
       agg: count_distinct
-      description: 下单用户数
+      description: Ordering users
 
   dimensions:
     - name: order_date
@@ -177,20 +177,20 @@ semantic_model:
       type_params:
         time_granularity: day
       expr: order_date
-      label: 下单日期
+      label: Order date
     - name: channel
       type: categorical
-      label: 渠道
+      label: Channel
     - name: status
       type: categorical
-      label: 状态
+      label: Status
 """
 
 _USERS_YAML = """---
 semantic_model:
   name: users
-  description: 用户表
-  label: 用户表
+  description: Users table
+  label: Users table
 
   db_table: dw.users
 
@@ -201,34 +201,34 @@ semantic_model:
     - name: user
       type: primary
       expr: user_id
-      label: 用户
+      label: User
 
   measures:
     - name: user_count
       expr: user_id
       agg: count_distinct
-      description: 用户数
+      description: User count
 
   dimensions:
     - name: city
       type: categorical
-      label: 城市
+      label: City
     - name: level
       type: categorical
-      label: 等级
+      label: Customer level
     - name: register_date
       type: time
       type_params:
         time_granularity: day
       expr: register_date
-      label: 注册日期
+      label: Registration date
 """
 
 _PRODUCTS_YAML = """---
 semantic_model:
   name: products
-  description: 商品表
-  label: 商品表
+  description: Products table
+  label: Products table
 
   db_table: dw.products
 
@@ -236,22 +236,22 @@ semantic_model:
     - name: product
       type: primary
       expr: product_id
-      label: 商品
+      label: Product
 
   measures:
     - name: product_count
       expr: product_id
       agg: count_distinct
-      description: 商品数
+      description: Product count
       create_metric: false
 
   dimensions:
     - name: category
       type: categorical
-      label: 分类
+      label: Category
     - name: brand
       type: categorical
-      label: 品牌
+      label: Brand
 """
 
 _PROJECT_YAML = """---

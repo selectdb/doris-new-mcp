@@ -82,7 +82,7 @@ semantic_model:
   metrics:
     - name: revenue_per_user
       type: derived
-      description: 人均消费
+      description: Spend per user
       expr: total_amount / user_count
 """
 
@@ -99,7 +99,7 @@ semantic_model:
   metrics:
     - name: order_completion_rate
       type: ratio
-      description: 订单完成率
+      description: Order completion rate
       numerator: order_count
       denominator: total_amount
 """
@@ -120,7 +120,7 @@ semantic_model:
   metrics:
     - name: visit_to_order
       type: conversion
-      description: 访问到下单转化
+      description: Visit-to-order conversion
       entity: user
 """
 

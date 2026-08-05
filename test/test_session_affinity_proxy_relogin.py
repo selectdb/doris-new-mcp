@@ -1,8 +1,8 @@
-"""离线测试：上游节点不可达时清除 Session Cookie 并引导重新登录。
+"""Offline test: clear the session cookie and redirect to login when upstream is unreachable.
 
-目标节点宕机后代理必须：
-1. 清除浏览器中的 ``doris_mcp_session`` Cookie（Set-Cookie: max-age=0）
-2. 返回 303 重定向到 ``/mcp/web/login``，让用户在健康节点重新登录
+After the target node goes down, the proxy must:
+1. Clear the browser's ``doris_mcp_session`` cookie (Set-Cookie: max-age=0)
+2. Return a 303 redirect to ``/mcp/web/login`` so the user can log in on a healthy node
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def _sender():
 
 
 class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
-    """上游节点不可达时必须清除 Cookie 并引导重登录。"""
+    """Unreachable upstream nodes must clear cookies and force relogin."""
 
     def _make_proxy(
         self,
@@ -77,7 +77,7 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
         )
         return proxy, client
 
-    # ── 连接失败 ──────────────────────────────────────────────────
+    # ── Connection failures ──────────────────────────────────────────────────
 
     async def test_connect_error_clears_cookie_and_redirects_to_login(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -113,7 +113,7 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
 
         self._assert_clears_cookie_and_redirects_to_login(sent)
 
-    # ── 超时 ──────────────────────────────────────────────────────
+    # ── Timeouts ──────────────────────────────────────────────────────
 
     async def test_read_timeout_clears_cookie_and_redirects_to_login(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -166,7 +166,7 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
 
         self._assert_clears_cookie_and_redirects_to_login(sent)
 
-    # ── logout 不可达也要清除 Cookie ─────────────────────────────
+    # ── Unreachable logout must still clear cookies ─────────────────────────────
 
     async def test_logout_upstream_unreachable_still_clears_local_cookie(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -185,7 +185,7 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
 
         self._assert_clears_cookie_and_redirects_to_login(sent)
 
-    # ── 正常代理不过度清理 ────────────────────────────────────────
+    # ── Successful proxying must not over-clear ────────────────────────────────────────
 
     async def test_successful_upstream_does_not_clear_cookie(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -203,7 +203,7 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertEqual(sent[0]["status"], 200)
-        # 上游的 Set-Cookie 透传，不额外注入清 Cookie
+        # Upstream Set-Cookie passes through without injecting an extra clearing cookie.
         set_cookie_values = [
             v for n, v in sent[0]["headers"] if n.lower() == b"set-cookie"
         ]
@@ -231,7 +231,7 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
             {n.lower() for n, _ in sent[0]["headers"]},
         )
 
-    # ── 不允许泄露目标 IP ─────────────────────────────────────────
+    # ── Target IP must not leak ─────────────────────────────────────────
 
     async def test_unreachable_response_does_not_leak_target_ip(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -253,7 +253,7 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
         header_bytes = b"".join(n + b":" + v for n, v in sent[0]["headers"])
         self.assertNotIn(REMOTE_IP.encode(), header_bytes)
 
-    # ── 断言辅助 ──────────────────────────────────────────────────
+    # ── Assertion helpers ──────────────────────────────────────────────────
 
     def _assert_clears_cookie_and_redirects_to_login(
         self, sent: list[dict[str, Any]]
@@ -262,17 +262,17 @@ class UpstreamUnreachableReloginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(start["type"], "http.response.start")
         self.assertIn(start["status"], (302, 303))
 
-        # Location 指向登录页
+        # Location points to the login page.
         location = [
             v for n, v in start["headers"] if n.lower() == b"location"
         ]
         self.assertEqual(location, [b"/mcp/web/login"])
 
-        # Set-Cookie 清除 doris_mcp_session
+        # Set-Cookie clears doris_mcp_session.
         set_cookie_headers = [
             v for n, v in start["headers"] if n.lower() == b"set-cookie"
         ]
-        # 至少有一个清 Cookie 的 Set-Cookie
+        # At least one Set-Cookie header must clear the cookie.
         clearing = [
             v for v in set_cookie_headers
             if _WEBUI_SESSION_COOKIE in v and (b"Max-Age=0" in v or b"Expires=" in v)

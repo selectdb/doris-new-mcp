@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# start-mcp-server.sh — 一键启动 doris-mcp-server
+# start-mcp-server.sh — start doris-mcp-server
 #
-# 所有配置从同目录 mcp-server.toml 读取，无需传参。
+# All configuration is read from mcp-server.toml in the same directory.
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# 优先使用 DORIS_MCP_PYTHON 环境变量，否则用自带的 Python
+# Prefer DORIS_MCP_PYTHON; otherwise use the bundled Python.
 PYTHON="${DORIS_MCP_PYTHON:-$SCRIPT_DIR/python/bin/python3}"
 CONFIG="$SCRIPT_DIR/mcp-server.toml"
 
