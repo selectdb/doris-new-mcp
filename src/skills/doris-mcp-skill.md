@@ -55,22 +55,22 @@ Returns:
 // Response
 {
   "data": [
-    {"name": "total_amount", "description": "订单总金额"},
-    {"name": "order_count",   "description": "订单数"},
-    {"name": "avg_amount",    "description": "平均客单价"},
-    {"name": "unique_users",  "description": "下单用户数"},
-    {"name": "user_count",    "description": "用户数"}
+    {"name": "total_amount", "description": "Total order amount"},
+    {"name": "order_count",   "description": "Order count"},
+    {"name": "avg_amount",    "description": "Average order value"},
+    {"name": "unique_users",  "description": "Ordering users"},
+    {"name": "user_count",    "description": "User count"}
   ],
   "meta": {"total_count": 5}
 }
 ```
 
 **How to match user intent to a metric:**
-- "销售额 / 营收 / GMV" → `total_amount`
-- "订单量 / 成交量" → `order_count`
-- "客单价" → `avg_amount`
-- "下单用户数" → `unique_users`
-- "用户数" → `user_count`
+- "sales / revenue / GMV" → `total_amount`
+- "orders / transactions" → `order_count`
+- "average order value / AOV" → `avg_amount`
+- "ordering users / purchasing users" → `unique_users`
+- "users / customer count" → `user_count`
 
 If the user's question doesn't clearly match any metric, call `list_metrics` and scan all descriptions. If nothing matches, fall back to raw SQL.
 
@@ -85,14 +85,14 @@ If the user's question doesn't clearly match any metric, call `list_metrics` and
 // Response
 {
   "data": [
-    {"name": "order_date",    "type": "time",        "description": "下单日期（按天）"},
-    {"name": "channel",       "type": "categorical", "description": "下单渠道"},
-    {"name": "status",        "type": "categorical", "description": "订单状态"},
-    {"name": "city",          "type": "categorical", "description": "城市"},
-    {"name": "level",         "type": "categorical", "description": "等级"},
-    {"name": "register_date", "type": "time",        "description": "注册日期"},
-    {"name": "category",      "type": "categorical", "description": "分类"},
-    {"name": "brand",         "type": "categorical", "description": "品牌"}
+    {"name": "order_date",    "type": "time",        "description": "Order date (day grain)"},
+    {"name": "channel",       "type": "categorical", "description": "Order channel"},
+    {"name": "status",        "type": "categorical", "description": "Order status"},
+    {"name": "city",          "type": "categorical", "description": "City"},
+    {"name": "level",         "type": "categorical", "description": "Customer level"},
+    {"name": "register_date", "type": "time",        "description": "Registration date"},
+    {"name": "category",      "type": "categorical", "description": "Product category"},
+    {"name": "brand",         "type": "categorical", "description": "Brand"}
   ],
   "meta": {"metric": "total_amount", "count": 8}
 }
@@ -180,23 +180,23 @@ order_by=["-total_amount", "channel"]  # multi-column
 ### Full Examples
 
 ```json
-// "各渠道销售额"
+// "Sales by channel"
 {"workspace": "example", "metrics": ["total_amount"], "group_by": ["channel"]}
 
-// "2月份每日订单量趋势"
+// "Daily order trend in February"
 {"workspace": "example", "metrics": ["order_count"], "group_by": ["order_date"],
  "where": "order_date >= '2026-02-01' AND order_date <= '2026-02-28'",
  "order_by": ["order_date"]}
 
-// "销售额 Top 3 渠道"
+// "Top 3 channels by sales"
 {"workspace": "example", "metrics": ["total_amount"], "group_by": ["channel"],
  "order_by": ["-total_amount"], "limit": 3}
 
-// "已完成订单的渠道分布"
+// "Channel distribution for completed orders"
 {"workspace": "example", "metrics": ["total_amount", "order_count"],
  "group_by": ["channel"], "where": "status = 'completed'"}
 
-// "各品牌销售额，只看卖得好的"
+// "Sales by brand, showing only strong sellers"
 {"workspace": "example", "metrics": ["total_amount"], "group_by": ["brand"],
  "order_by": ["-total_amount"], "having": "total_amount > 500"}
 ```
