@@ -27,22 +27,22 @@ SEMANTIC_MODELS = [
         "name": "orders",
         "measures": [{"name": "total_amount"}, {"name": "order_count"}],
         "dimensions": [
-            {"name": "channel", "type": "categorical", "description": "渠道"},
-            {"name": "order_date", "type": "time", "description": "下单日期"},
+            {"name": "channel", "type": "categorical", "description": "Channel"},
+            {"name": "order_date", "type": "time", "description": "Order date"},
         ],
     },
     {
         "name": "users",
         "measures": [{"name": "user_count"}],
         "dimensions": [
-            {"name": "city", "type": "categorical", "description": "城市"},
+            {"name": "city", "type": "categorical", "description": "City"},
         ],
     },
     {
         "name": "visits",
         "measures": [{"name": "visit_count"}, {"name": "signup_count"}],
         "dimensions": [
-            {"name": "source", "type": "categorical", "description": "来源"},
+            {"name": "source", "type": "categorical", "description": "Source"},
         ],
     },
 ]
