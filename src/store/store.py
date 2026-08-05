@@ -70,8 +70,15 @@ def set_request_credentials(user: str, password: str) -> None:
     _request_creds.set((user, password))
 
 
+def set_doris_endpoint(host: str, port: int) -> None:
+    """Update the Doris FE endpoint from server configuration."""
+    global _DORIS_HOST, _DORIS_PORT
+    _DORIS_HOST = host
+    _DORIS_PORT = port
+
+
 def set_doris_port(port: int) -> None:
-    """Update the Doris admin port (called at startup from config)."""
+    """Update only the Doris FE port while preserving the configured host."""
     global _DORIS_PORT
     _DORIS_PORT = port
 

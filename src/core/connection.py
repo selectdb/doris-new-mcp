@@ -30,7 +30,7 @@ class ConnectionPool:
         self._password = password
         self._min_size = min_size if min_size is not None else cluster.pool_min_size
         self._max_size = max_size if max_size is not None else cluster.pool_max_size
-        self._host = host or cluster.fe_host  # override for per-user non-127.0.0.1 pools
+        self._host = host or cluster.fe_host
         self._pool: aiomysql.Pool | None = None
         self._lock = asyncio.Lock()
 

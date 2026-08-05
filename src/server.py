@@ -101,7 +101,12 @@ def _request_server_ip(request: "Request", fallback_ip: str) -> str:
     return fallback_ip
 
 
-def _webui_private_ip(request: "Request", listen_host: str, fallback_ip: str) -> str:
+def _webui_private_ip(
+    request: "Request",
+    listen_host: str,
+    fallback_ip: str,
+    configured_private_ips: tuple[str, ...] = (),
+) -> str:
     """Choose the IPv4 stored in a newly-issued Web UI session cookie."""
     if listen_host != "0.0.0.0":
         try:
@@ -115,6 +120,8 @@ def _webui_private_ip(request: "Request", listen_host: str, fallback_ip: str) ->
                 "server.mcp_host must be a concrete IPv4 address or 0.0.0.0"
             )
         return parsed_ip.compressed
+    if len(configured_private_ips) == 1:
+        return configured_private_ips[0]
     return _request_server_ip(request, fallback_ip)
 
 
@@ -134,6 +141,54 @@ def get_machine_ip() -> str | None:
         return None
     finally:
         sock.close()
+
+
+def get_configured_private_ips(fallback_ip: str | None = None) -> tuple[str, ...]:
+    """Return RFC-1918 addresses configured on IPv4 default-route interfaces."""
+    import subprocess
+
+    candidates: set[str] = set()
+    try:
+        routes = subprocess.run(
+            ["ip", "-o", "-4", "route", "show", "default"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        interfaces = set()
+        for line in routes.stdout.splitlines():
+            parts = line.split()
+            if "dev" in parts:
+                index = parts.index("dev") + 1
+                if index < len(parts):
+                    interfaces.add(parts[index])
+        addresses = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show", "scope", "global"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        for line in addresses.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[1].rstrip(":") in interfaces and parts[2] == "inet":
+                candidates.add(parts[3].split("/", 1)[0])
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    if not candidates and fallback_ip:
+        candidates.add(fallback_ip)
+
+    private_ips = []
+    for candidate in candidates:
+        try:
+            parsed_ip = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if isinstance(parsed_ip, ipaddress.IPv4Address) and _is_rfc1918_ipv4(parsed_ip):
+            private_ips.append(parsed_ip.compressed)
+    return tuple(sorted(set(private_ips), key=ipaddress.ip_address))
 
 
 def resolve_machine_ip() -> str:
@@ -198,8 +253,8 @@ def create_server(
 
     # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
-    from store.store import set_doris_port
-    set_doris_port(cc.fe_mysql_port)
+    from store.store import set_doris_endpoint
+    set_doris_endpoint(cc.fe_host, cc.fe_mysql_port)
     multi_watcher = MultiWorkspaceWatcher(
         config_dir=_Path(config_path),
         workspace_root=_ws_root,
@@ -485,7 +540,7 @@ def create_server(
         username = access_token.client_id
         password = parts[1] if len(parts) > 1 else ""
         return await pool_manager.get_or_create_local_pool(
-            username, password, host=_MACHINE_IP,
+            username, password,
             on_auth_error=lambda: _credential_cache.clear(username, password),
         )
 
@@ -508,9 +563,10 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    # Fallback node identity for Doris connections and requests whose ASGI
-    # scope does not expose a usable local IPv4 address.
+    # MCP node identity for session affinity. Doris connections use fe_host.
     _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip()
+    _CONFIGURED_PRIVATE_IPS = get_configured_private_ips(_MACHINE_IP)
+    logger.info("Configured private IPv4 addresses: %s", _CONFIGURED_PRIVATE_IPS)
 
     def _verify_doris_credentials(user: str, password: str) -> tuple[bool, bool]:
         import pymysql
@@ -519,7 +575,7 @@ def create_server(
             return False, False
         try:
             conn = pymysql.connect(
-                host=_MACHINE_IP, port=cc.fe_mysql_port,
+                host=cc.fe_host, port=cc.fe_mysql_port,
                 user=user, password=password,
                 charset="utf8mb4", connect_timeout=5,
             )
@@ -1279,7 +1335,9 @@ def create_server(
         # Create session (any authenticated Doris user can log in)
         _prune_webui_sessions()
         session_id = _secrets.token_urlsafe(32)
-        private_ip = _webui_private_ip(request, cfg.mcp.host, _MACHINE_IP)
+        private_ip = _webui_private_ip(
+            request, cfg.mcp.host, _MACHINE_IP, _CONFIGURED_PRIVATE_IPS
+        )
         session_cookie_value = _encode_webui_session_cookie(session_id, private_ip)
         _webui_sessions[session_id] = {
             "doris_user": user,

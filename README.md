@@ -56,7 +56,7 @@ Or build from source (see [Building from Source](#building-from-source)).
 
 ### 2. Start the server
 
-The default configuration expects a Doris FE on the same host (`127.0.0.1:9030`). Edit `mcp-server.toml` if needed, then:
+The default points to a same-host Doris FE (`127.0.0.1:9030`). For a separate deployment, set `server.fe_host` to the FE private IP or hostname, then:
 
 ```bash
 # Foreground
@@ -146,7 +146,7 @@ check_service_health()         ← 2. Doris connectivity + workspace status
 | Key | Default | Description |
 |-----|---------|-------------|
 | `server.mcp_host` / `server.mcp_port` | `0.0.0.0` / `3000` | HTTP listen address |
-| `server.fe_port` | `9030` | Doris FE MySQL port (same host) |
+| `server.fe_host` / `server.fe_port` | `127.0.0.1` / `9030` | Doris FE endpoint; set a private IP or hostname for remote FE deployment |
 | `query.db_whitelist` | `[]` | Optional database allow-list |
 | `query.query_timeout_seconds` | `600` | SQL query timeout |
 | `query.query_max_rows` | `10000` | Max rows per query |

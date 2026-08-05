@@ -184,7 +184,7 @@ Authorization: Bearer username:password
 |------|------|------|
 | 1 | `CredentialVerifier.verify_token()` | 取第一个 `:` 分割 username 和 password |
 | 2 | `CredentialCache` | 查询 10 分钟 TTL 内存缓存 |
-| 3 | `pymysql.connect(host=<机器IP>, user, password)` | 对 Doris 验证凭据 |
+| 3 | `pymysql.connect(host=<fe_host>, user, password)` | 通过配置的 Doris FE 验证凭据 |
 | 4 | 有效 → 缓存 → 返回 `AccessToken` | |
 | 5 | 无效 → 返回 401 | |
 

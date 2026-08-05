@@ -323,6 +323,21 @@ class TestHTTPCredentialInjection(unittest.TestCase):
 class TestStoreOperationsWithCredentials(unittest.TestCase):
     """Store operations (list_files, staging_list, etc.) use injected creds."""
 
+    def test_store_uses_configured_remote_fe_endpoint(self):
+        import store.store as st
+
+        original_host, original_port = st._DORIS_HOST, st._DORIS_PORT
+        st.set_request_credentials("admin", "remote_pass")
+        try:
+            st.set_doris_endpoint("10.20.30.40", 19030)
+            with patch("store.store.pymysql.connect") as mock_connect:
+                st._get_conn()
+
+            self.assertEqual(mock_connect.call_args.kwargs["host"], "10.20.30.40")
+            self.assertEqual(mock_connect.call_args.kwargs["port"], 19030)
+        finally:
+            st.set_doris_endpoint(original_host, original_port)
+
     def test_doris_store_uses_injected_credentials(self):
         """DorisStore operations → _get_conn() → uses contextvar creds."""
         import store.store as st
