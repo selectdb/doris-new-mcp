@@ -1,13 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# test/run_all_tests.sh — 一键运行所有测试
+# test/run_all_tests.sh — run all tests
 #
-# 用法:
-#   bash test/run_all_tests.sh              # 运行全部测试（需 MCP Server）
-#   bash test/run_all_tests.sh --offline    # 仅离线单元测试（无需 MCP Server）
-#   bash test/run_all_tests.sh --tools      # 离线测试 + 仅 Tool 在线测试
-#   bash test/run_all_tests.sh --web        # 离线测试 + 仅 Web/API 在线测试
-#   bash test/run_all_tests.sh --smoke      # 离线测试 + 冒烟测试 (快速)
+# Usage:
+#   bash test/run_all_tests.sh              # run all tests (requires MCP Server)
+#   bash test/run_all_tests.sh --offline    # offline unit tests only (no MCP Server)
+#   bash test/run_all_tests.sh --tools      # offline tests + Tool online tests only
+#   bash test/run_all_tests.sh --web        # offline tests + Web/API online tests only
+#   bash test/run_all_tests.sh --smoke      # offline tests + smoke test only (fast)
 # =============================================================================
 set -euo pipefail
 
@@ -16,7 +16,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MCP_URL="${MCP_URL:-http://localhost:3000/mcp}"
 MCP_BASE_URL="${MCP_BASE_URL:-http://localhost:3000}"
 
-# 优先使用项目 venv 的解释器（离线测试依赖其中的第三方包）
+# Prefer the project venv interpreter; offline tests depend on its packages.
 PYTHON_BIN="${PYTHON_BIN:-$PROJECT_DIR/.venv/bin/python}"
 if [ ! -x "$PYTHON_BIN" ]; then
     PYTHON_BIN="python3"
@@ -27,18 +27,18 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# ── 检查 MCP Server 是否运行 ────────────────────
+# ── Check whether MCP Server is running ────────────────────
 check_server() {
     if curl -s -o /dev/null -w "%{http_code}" "$MCP_BASE_URL/mcp/web/login" > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ MCP Server 运行中${NC}"
+        echo -e "${GREEN}✅ MCP Server is running${NC}"
     else
-        echo -e "${RED}❌ MCP Server 未运行在 $MCP_BASE_URL${NC}"
-        echo "   请先启动: cd $PROJECT_DIR && ./start-mcp-server.sh"
+        echo -e "${RED}❌ MCP Server is not running at $MCP_BASE_URL${NC}"
+        echo "   Start it first: cd $PROJECT_DIR && ./start-mcp-server.sh"
         exit 1
     fi
 }
 
-# ── 运行 Python 测试 ────────────────────────────
+# ── Run Python tests ────────────────────────────
 run_python_test() {
     local test_file="$1"
     local label="$2"
@@ -47,18 +47,18 @@ run_python_test() {
     echo -e "${YELLOW}  $label${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     if "$PYTHON_BIN" "$test_file"; then
-        echo -e "${GREEN}✅ $label 通过${NC}"
+        echo -e "${GREEN}✅ $label passed${NC}"
         return 0
     else
-        echo -e "${RED}❌ $label 失败${NC}"
+        echo -e "${RED}❌ $label failed${NC}"
         return 1
     fi
 }
 
-# ── 冒烟测试 (快速) ────────────────────────────
+# ── Smoke test (fast) ────────────────────────────
 smoke_test() {
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}  冒烟测试${NC}"
+    echo -e "${YELLOW}  Smoke test${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
     # 1. Health check
@@ -114,28 +114,28 @@ smoke_test() {
         return 1
     fi
 
-    echo -e "${GREEN}✅ 冒烟测试全部通过${NC}"
+    echo -e "${GREEN}✅ Smoke test passed${NC}"
     return 0
 }
 
-# ── 离线单元测试（无需启动 MCP Server） ─────────
+# ── Offline unit tests (no MCP Server required) ─────────
 run_offline_unit_tests() {
-    run_python_test "$SCRIPT_DIR/test_sql_validator.py" "SQL 只读校验离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_sensitive_mask.py" "敏感信息脱敏离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_pagination.py" "分页离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_private_ip_config.py" "请求节点 IP 离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_deps.py" "运行时依赖守卫离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_cross_file_deps.py" "跨文件依赖检测离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_semantic_grant.py" "语义表授权离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_credential_pass.py" "凭据透传离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_watcher.py" "工作区 Watcher 离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_manifest_dims.py" "指标维度提取离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_compiler_where.py" "WHERE 字面量处理离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_web_session_cookie.py" "Web 会话 Cookie 离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_routing.py" "会话亲和代理路由离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_streaming.py" "会话亲和代理流式离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_relogin.py" "会话亲和代理重登录离线单元测试" || ((FAIL_COUNT += 1))
-    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_force_target.py" "会话亲和代理请求地址离线单元测试" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_sql_validator.py" "SQL read-only validation offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_sensitive_mask.py" "Sensitive data masking offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_pagination.py" "Pagination offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_private_ip_config.py" "Request node IP offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_deps.py" "Runtime dependency guard offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_cross_file_deps.py" "Cross-file dependency detection offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_semantic_grant.py" "Semantic table grant offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_credential_pass.py" "Credential pass-through offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_watcher.py" "Workspace watcher offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_manifest_dims.py" "Metric dimension extraction offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_compiler_where.py" "WHERE literal handling offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_web_session_cookie.py" "Web session cookie offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_routing.py" "Session affinity proxy routing offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_streaming.py" "Session affinity proxy streaming offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_relogin.py" "Session affinity proxy relogin offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_session_affinity_proxy_force_target.py" "Session affinity proxy request target offline unit test" || ((FAIL_COUNT += 1))
 }
 
 # ── Main ─────────────────────────────────────────
@@ -146,7 +146,7 @@ MODE="${1:-}"
 run_offline_unit_tests
 
 if [ "$MODE" = "--offline" ]; then
-    : # 离线模式：不检查服务器、不跑在线阶段
+    : # Offline mode: do not check the server or run online stages.
 else
     check_server
 fi
@@ -155,27 +155,27 @@ case "$MODE" in
     --offline)
         ;;
     --tools)
-        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools 测试" || ((FAIL_COUNT += 1))
+        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools test" || ((FAIL_COUNT += 1))
         ;;
     --web)
-        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API 测试" || ((FAIL_COUNT += 1))
+        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API test" || ((FAIL_COUNT += 1))
         ;;
     --smoke)
         smoke_test || ((FAIL_COUNT += 1))
         ;;
     "")
-        # 全部运行
+        # Run everything.
         smoke_test || ((FAIL_COUNT += 1))
-        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools 测试" || ((FAIL_COUNT += 1))
-        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API 测试" || ((FAIL_COUNT += 1))
+        run_python_test "$SCRIPT_DIR/test_mcp_tools.py" "MCP Tools test" || ((FAIL_COUNT += 1))
+        run_python_test "$SCRIPT_DIR/test_web_api.py" "Web UI & API test" || ((FAIL_COUNT += 1))
         ;;
     *)
         echo "Usage: $0 [--offline|--tools|--web|--smoke]"
-        echo "  (no args)  运行全部测试（需 MCP Server）"
-        echo "  --offline  仅离线单元测试（无需 MCP Server）"
-        echo "  --tools    仅 MCP Tool 测试"
-        echo "  --web      仅 Web UI & API 测试"
-        echo "  --smoke    仅冒烟测试 (快速)"
+        echo "  (no args)  Run all tests (requires MCP Server)"
+        echo "  --offline  Offline unit tests only (no MCP Server)"
+        echo "  --tools    MCP Tool tests only"
+        echo "  --web      Web UI & API tests only"
+        echo "  --smoke    Smoke test only (fast)"
         exit 1
         ;;
 esac
@@ -183,11 +183,11 @@ esac
 echo ""
 if [ "$FAIL_COUNT" -eq 0 ]; then
     echo -e "${GREEN}═══════════════════════════════════${NC}"
-    echo -e "${GREEN}  🎉 全部测试通过!${NC}"
+    echo -e "${GREEN}  🎉 All tests passed!${NC}"
     echo -e "${GREEN}═══════════════════════════════════${NC}"
 else
     echo -e "${RED}═══════════════════════════════════${NC}"
-    echo -e "${RED}  ❌ $FAIL_COUNT 个测试失败${NC}"
+    echo -e "${RED}  ❌ $FAIL_COUNT test(s) failed${NC}"
     echo -e "${RED}═══════════════════════════════════${NC}"
     exit 1
 fi
