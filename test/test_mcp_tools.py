@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-MCP Tool 测试用例 — 覆盖全部 10 个 Tool
+MCP Tool test cases — covers all 10 tools
 
-运行环境:
-  - Doris FE 127.0.0.1:9030，admin:admin
+Runtime:
+  - Doris FE 127.0.0.1:9030, admin:admin
   - MCP Server http://localhost:3000/mcp
   - Python 3.10+
 
-用法:
+Usage:
   python -m pytest test/test_mcp_tools.py -v
-  或直接: python test/test_mcp_tools.py
+  Or run directly: python test/test_mcp_tools.py
 """
 
 import json
@@ -19,7 +19,7 @@ import unittest
 import urllib.request
 import urllib.error
 
-# ── 配置 ─────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────
 MCP_URL = os.environ.get("MCP_URL", "http://localhost:3000/mcp")
 AUTH_TOKEN = os.environ.get("MCP_TOKEN", "admin:admin")
 WORKSPACE = os.environ.get("MCP_WORKSPACE", "example")
@@ -30,12 +30,12 @@ HEADERS = {
     "Authorization": f"Bearer {AUTH_TOKEN}",
 }
 
-# 仅连接类异常允许跳过测试；AssertionError 必须冒出来
+# Only connection-type errors may skip tests; AssertionError must surface.
 _CONN_ERRORS = (urllib.error.URLError, ConnectionError, TimeoutError)
 
 
 def _call_tool(name: str, arguments: dict) -> dict:
-    """调用 MCP Tool，解析 SSE 响应"""
+    """Call an MCP tool and parse the SSE response."""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -51,7 +51,7 @@ def _call_tool(name: str, arguments: dict) -> dict:
     except urllib.error.HTTPError as e:
         return {"error": str(e.code), "body": e.read().decode()}
 
-    # 解析 SSE: "event: message\ndata: <json>\n\n"
+    # Parse SSE: "event: message\ndata: <json>\n\n"
     data_json = body
     if body.startswith("event: message"):
         data_line = [l for l in body.split("\n") if l.startswith("data:")]
@@ -64,7 +64,7 @@ def _call_tool(name: str, arguments: dict) -> dict:
 
 
 def _assert_success(result: dict):
-    """断言调用成功"""
+    """Assert that the tool call succeeded."""
     assert "result" in result, f"Expected 'result' key: {json.dumps(result, ensure_ascii=False)[:500]}"
     assert not result.get("isError"), f"Tool returned error: {json.dumps(result, ensure_ascii=False)[:500]}"
     content = result["result"]["content"][0]["text"]
@@ -78,15 +78,15 @@ def _assert_success(result: dict):
 # ═══════════════════════════════════════════════════════
 
 def test_get_query_guide():
-    """Tool #1: 获取工作流指引 — 第一步必调"""
+    """Tool #1: get workflow guide — mandatory first step."""
     result = _call_tool("get_query_guide", {})
     assert "result" in result
     text = result["result"]["content"][0]["text"]
     assert len(text) > 100, f"Guide too short: {len(text)} chars"
-    # 应包含关键指引内容，如语义层使用说明、工具调用顺序等
-    assert any(kw in text.lower() for kw in ["指标", "语义", "metric", "query", "workspace"]), \
+    # Must contain key guide content, such as metric layer usage and tool order.
+    assert any(kw in text.lower() for kw in ["metric", "semantic", "query", "workspace"]), \
         f"Guide missing key content: {text[:200]}"
-    print("  ✅ get_query_guide 返回有效指引")
+    print("  ✅ get_query_guide returned a valid guide")
 
 
 # ═══════════════════════════════════════════════════════
@@ -94,18 +94,18 @@ def test_get_query_guide():
 # ═══════════════════════════════════════════════════════
 
 def test_check_service_health_basic():
-    """Tool #2: 基础健康检查"""
+    """Tool #2: basic health check."""
     data = _assert_success(_call_tool("check_service_health", {}))
     assert data["data"]["doris"] == "connected", f"Doris not connected: {data}"
     assert "workspaces" in data["data"], "Missing workspaces"
-    print(f"  ✅ Doris 连接正常, workspaces: {list(data['data']['workspaces'].keys())}")
+    print(f"  ✅ Doris connected, workspaces: {list(data['data']['workspaces'].keys())}")
 
 
 def test_check_service_health_detail():
-    """Tool #2: 详细健康检查"""
+    """Tool #2: detailed health check."""
     data = _assert_success(_call_tool("check_service_health", {"detail": True}))
     assert data["data"]["doris"] == "connected"
-    print(f"  ✅ 详细健康检查通过")
+    print("  ✅ Detailed health check passed")
 
 
 # ═══════════════════════════════════════════════════════
@@ -113,21 +113,21 @@ def test_check_service_health_detail():
 # ═══════════════════════════════════════════════════════
 
 def test_list_metrics():
-    """Tool #3: 列出工作区指标"""
+    """Tool #3: list workspace metrics."""
     data = _assert_success(
         _call_tool("list_metrics", {"workspace": WORKSPACE})
     )
     assert "data" in data
-    print(f"  ✅ 指标列表: {data['data']}")
+    print(f"  ✅ Metric list: {data['data']}")
 
 
 def test_list_metrics_pagination():
-    """Tool #3: 分页测试"""
+    """Tool #3: pagination test."""
     data = _assert_success(
         _call_tool("list_metrics", {"workspace": WORKSPACE, "page_size": 2})
     )
     assert "meta" in data, "Missing pagination meta"
-    print(f"  ✅ 分页正常, total_count={data.get('meta', {}).get('total_count', 'N/A')}")
+    print(f"  ✅ Pagination OK, total_count={data.get('meta', {}).get('total_count', 'N/A')}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -135,8 +135,8 @@ def test_list_metrics_pagination():
 # ═══════════════════════════════════════════════════════
 
 def test_list_dimensions_for_metric():
-    """Tool #4: 列出指标维度"""
-    # 需要语义层就绪；仅在 MCP Server 不可达（连接类异常）时跳过
+    """Tool #4: list metric dimensions."""
+    # Requires a ready semantic layer; skip only on MCP Server connection errors.
     try:
         data = _assert_success(
             _call_tool("list_dimensions_for_metric", {
@@ -145,10 +145,10 @@ def test_list_dimensions_for_metric():
             })
         )
         assert "data" in data
-        print(f"  ✅ total_amount 维度: {data['data']}")
+        print(f"  ✅ total_amount dimensions: {data['data']}")
     except _CONN_ERRORS as e:
-        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
-        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
+        # Only connection errors may skip; semantic readiness assertions must surface.
+        raise unittest.SkipTest(f"Skipped: MCP Server is unreachable: {e}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -156,7 +156,7 @@ def test_list_dimensions_for_metric():
 # ═══════════════════════════════════════════════════════
 
 def test_query_metric_basic():
-    """Tool #5: 核心 — 语义查询单个指标"""
+    """Tool #5: core semantic query for one metric."""
     try:
         data = _assert_success(
             _call_tool("query_metric", {
@@ -165,14 +165,14 @@ def test_query_metric_basic():
             })
         )
         assert "data" in data
-        print(f"  ✅ query_metric 结果: {data['data']}")
+        print(f"  ✅ query_metric result: {data['data']}")
     except _CONN_ERRORS as e:
-        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
-        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
+        # Only connection errors may skip; semantic readiness assertions must surface.
+        raise unittest.SkipTest(f"Skipped: MCP Server is unreachable: {e}")
 
 
 def test_query_metric_with_group_by():
-    """Tool #5: 带 group_by 的语义查询"""
+    """Tool #5: semantic query with group_by."""
     try:
         data = _assert_success(
             _call_tool("query_metric", {
@@ -182,14 +182,14 @@ def test_query_metric_with_group_by():
             })
         )
         assert "data" in data
-        print(f"  ✅ 多指标+group_by 查询成功")
+        print("  ✅ Multi-metric group_by query succeeded")
     except _CONN_ERRORS as e:
-        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
-        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
+        # Only connection errors may skip; semantic readiness assertions must surface.
+        raise unittest.SkipTest(f"Skipped: MCP Server is unreachable: {e}")
 
 
 def test_query_metric_with_where():
-    """Tool #5: 带 where 条件的语义查询"""
+    """Tool #5: semantic query with where."""
     try:
         data = _assert_success(
             _call_tool("query_metric", {
@@ -198,14 +198,14 @@ def test_query_metric_with_where():
                 "where": '{{ Dimension("user__city") }} = \'Beijing\'',
             })
         )
-        print(f"  ✅ 带 where 条件的查询成功")
+        print("  ✅ Query with where succeeded")
     except _CONN_ERRORS as e:
-        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
-        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
+        # Only connection errors may skip; semantic readiness assertions must surface.
+        raise unittest.SkipTest(f"Skipped: MCP Server is unreachable: {e}")
 
 
 def test_query_metric_with_order_and_limit():
-    """Tool #5: 排序+分页"""
+    """Tool #5: ordering and pagination."""
     try:
         data = _assert_success(
             _call_tool("query_metric", {
@@ -216,10 +216,10 @@ def test_query_metric_with_order_and_limit():
                 "limit": 3,
             })
         )
-        print(f"  ✅ 排序+分页查询成功")
+        print("  ✅ Order and pagination query succeeded")
     except _CONN_ERRORS as e:
-        # 只有连接类异常才跳过；语义层未就绪等断言失败必须冒出来
-        raise unittest.SkipTest(f"跳过：MCP Server 不可达: {e}")
+        # Only connection errors may skip; semantic readiness assertions must surface.
+        raise unittest.SkipTest(f"Skipped: MCP Server is unreachable: {e}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -227,7 +227,7 @@ def test_query_metric_with_order_and_limit():
 # ═══════════════════════════════════════════════════════
 
 def test_list_databases():
-    """Tool #6: 列出所有数据库"""
+    """Tool #6: list all databases."""
     data = _assert_success(_call_tool("list_databases", {}))
     databases = data["data"]
     assert isinstance(databases, list)
@@ -235,17 +235,17 @@ def test_list_databases():
     expected = {"dw", "mysql", "information_schema", "system_mcp"}
     found = set(databases) & expected
     assert len(found) >= 2, f"Missing expected databases: {expected - found}"
-    print(f"  ✅ 数据库列表: {databases}")
+    print(f"  ✅ Database list: {databases}")
 
 
 def test_list_databases_pagination():
-    """Tool #6: 分页"""
+    """Tool #6: pagination."""
     data = _assert_success(
         _call_tool("list_databases", {"page_size": 2})
     )
     assert "meta" in data
     assert data["meta"]["total_count"] >= 2
-    print(f"  ✅ 分页: total={data['meta']['total_count']}")
+    print(f"  ✅ Pagination: total={data['meta']['total_count']}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -253,17 +253,17 @@ def test_list_databases_pagination():
 # ═══════════════════════════════════════════════════════
 
 def test_list_tables_mysql():
-    """Tool #7: 列出 mysql 库的表"""
+    """Tool #7: list tables in mysql."""
     data = _assert_success(
         _call_tool("list_tables", {"database": "mysql"})
     )
     assert "data" in data
     assert "user" in data["data"], f"Expected 'user' table: {data['data']}"
-    print(f"  ✅ mysql 表: {data['data']}")
+    print(f"  ✅ mysql tables: {data['data']}")
 
 
 def test_list_tables_dw():
-    """Tool #7: 列出 dw 库的表"""
+    """Tool #7: list tables in dw."""
     data = _assert_success(
         _call_tool("list_tables", {"database": "dw"})
     )
@@ -271,16 +271,16 @@ def test_list_tables_dw():
     expected = {"orders", "users", "products", "dim_date"}
     assert expected.issubset(set(dw_tables)), \
         f"Missing seed tables: {expected - set(dw_tables)}"
-    print(f"  ✅ dw 种子表: {dw_tables}")
+    print(f"  ✅ dw seed tables: {dw_tables}")
 
 
 def test_list_tables_with_like():
-    """Tool #7: 模糊匹配"""
+    """Tool #7: LIKE matching."""
     data = _assert_success(
         _call_tool("list_tables", {"database": "mysql", "like": "user%"})
     )
     assert "user" in data["data"]
-    print(f"  ✅ like 匹配正常")
+    print("  ✅ LIKE matching OK")
 
 
 # ═══════════════════════════════════════════════════════
@@ -288,7 +288,7 @@ def test_list_tables_with_like():
 # ═══════════════════════════════════════════════════════
 
 def test_describe_table_summary():
-    """Tool #8: 表结构 — summary 级别"""
+    """Tool #8: table schema — summary level."""
     data = _assert_success(
         _call_tool("describe_table", {
             "database": "dw",
@@ -297,11 +297,11 @@ def test_describe_table_summary():
         })
     )
     assert "data" in data
-    print(f"  ✅ dw.orders 结构: {data['data']}")
+    print(f"  ✅ dw.orders schema: {data['data']}")
 
 
 def test_describe_table_full():
-    """Tool #8: 表结构 — full 级别"""
+    """Tool #8: table schema — full level."""
     data = _assert_success(
         _call_tool("describe_table", {
             "database": "dw",
@@ -310,11 +310,11 @@ def test_describe_table_full():
         })
     )
     assert "data" in data
-    print(f"  ✅ dw.orders 完整结构")
+    print("  ✅ dw.orders full schema")
 
 
 def test_describe_table_names():
-    """Tool #8: 表结构 — names 级别（仅列名）"""
+    """Tool #8: table schema — names level (column names only)."""
     data = _assert_success(
         _call_tool("describe_table", {
             "database": "dw",
@@ -323,7 +323,7 @@ def test_describe_table_names():
         })
     )
     assert "data" in data
-    print(f"  ✅ dw.orders 列名")
+    print("  ✅ dw.orders column names")
 
 
 # ═══════════════════════════════════════════════════════
@@ -331,24 +331,24 @@ def test_describe_table_names():
 # ═══════════════════════════════════════════════════════
 
 def test_execute_query_select():
-    """Tool #9: 裸 SQL — 基本 SELECT"""
+    """Tool #9: raw SQL — basic SELECT."""
     data = _assert_success(
         _call_tool("execute_query", {"sql": "SELECT 1 AS n"})
     )
     assert data["data"]["rows"][0]["n"] == 1
-    print(f"  ✅ SELECT 1 返回正确")
+    print("  ✅ SELECT 1 returned the expected value")
 
 
 def test_execute_query_version():
-    """Tool #9: 裸 SQL — Doris 版本"""
+    """Tool #9: raw SQL — Doris version."""
     data = _assert_success(
         _call_tool("execute_query", {"sql": "SELECT VERSION()"})
     )
-    print(f"  ✅ Doris 版本: {data['data']['rows'][0]}")
+    print(f"  ✅ Doris version: {data['data']['rows'][0]}")
 
 
 def test_execute_query_with_database():
-    """Tool #9: 裸 SQL — 指定数据库"""
+    """Tool #9: raw SQL — explicit database."""
     data = _assert_success(
         _call_tool("execute_query", {
             "sql": "SELECT count(*) AS cnt FROM orders",
@@ -356,11 +356,11 @@ def test_execute_query_with_database():
         })
     )
     assert data["data"]["rows"][0]["cnt"] == 12
-    print(f"  ✅ dw.orders 有 12 条数据")
+    print("  ✅ dw.orders has 12 rows")
 
 
 def test_execute_query_with_max_rows():
-    """Tool #9: 裸 SQL — 限制返回行数"""
+    """Tool #9: raw SQL — limit returned rows."""
     data = _assert_success(
         _call_tool("execute_query", {
             "sql": "SELECT * FROM dw.dim_date",
@@ -368,31 +368,31 @@ def test_execute_query_with_max_rows():
         })
     )
     assert data["meta"]["row_count"] <= 5
-    print(f"  ✅ max_rows 限制生效, 返回 {data['meta']['row_count']} 行")
+    print(f"  ✅ max_rows enforced, returned {data['meta']['row_count']} rows")
 
 
 def test_execute_query_show():
-    """Tool #9: 裸 SQL — SHOW 语句"""
+    """Tool #9: raw SQL — SHOW statement."""
     data = _assert_success(
         _call_tool("execute_query", {"sql": "SHOW DATABASES"})
     )
     assert len(data["data"]["rows"]) >= 2
-    print(f"  ✅ SHOW DATABASES 成功")
+    print("  ✅ SHOW DATABASES succeeded")
 
 
 def test_execute_query_explain():
-    """Tool #9: 裸 SQL — EXPLAIN 语句"""
+    """Tool #9: raw SQL — EXPLAIN statement."""
     data = _assert_success(
         _call_tool("execute_query", {
             "sql": "EXPLAIN SELECT count(*) FROM dw.orders"
         })
     )
     assert "data" in data
-    print(f"  ✅ EXPLAIN 成功")
+    print("  ✅ EXPLAIN succeeded")
 
 
 def test_execute_query_blocked_write():
-    """Tool #9: 只读校验 — 拒绝 INSERT"""
+    """Tool #9: read-only validation — reject INSERT."""
     result = _call_tool("execute_query", {
         "sql": "INSERT INTO dw.orders VALUES (99,1,1,100,'online','done','2024-01-01')"
     })
@@ -400,7 +400,7 @@ def test_execute_query_blocked_write():
            "reject" in str(result).lower() or "not allowed" in str(result).lower() or \
            "forbidden" in str(result).lower() or "only" in str(result).lower(), \
         f"Should block write SQL: {result}"
-    print(f"  ✅ 写操作被正确拦截")
+    print("  ✅ Write operation was blocked correctly")
 
 
 # ═══════════════════════════════════════════════════════
@@ -408,23 +408,23 @@ def test_execute_query_blocked_write():
 # ═══════════════════════════════════════════════════════
 
 def test_reload_semantic_layer():
-    """Tool #10: 手动重载语义层"""
+    """Tool #10: manually reload semantic layer."""
     result = _call_tool("reload_semantic_layer", {"workspace": WORKSPACE})
-    # 必须返回合法的 JSON-RPC result，content 为可解析的结构化 JSON
-    # （success_response / error_response 都带 success 字段）
+    # Must return a valid JSON-RPC result with parseable structured JSON content.
+    # success_response / error_response both include the success field.
     assert "result" in result, f"Expected JSON-RPC result: {json.dumps(result, ensure_ascii=False)[:500]}"
     content = result["result"]["content"][0]["text"]
     data = json.loads(content)
     assert "success" in data, f"Payload missing 'success' field: {data}"
-    print(f"  ✅ reload 调用成功 (success={data['success']})")
+    print(f"  ✅ reload call succeeded (success={data['success']})")
 
 
 # ═══════════════════════════════════════════════════════
-#  认证/错误处理测试
+#  Auth/error handling tests
 # ═══════════════════════════════════════════════════════
 
 def test_auth_required():
-    """无 Authorization header 应拒绝"""
+    """No Authorization header should be rejected."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
@@ -442,11 +442,11 @@ def test_auth_required():
         assert False, "Should have returned error for unauthenticated request"
     except urllib.error.HTTPError as e:
         assert e.code in (401, 403), f"Expected 401/403, got {e.code}"
-        print(f"  ✅ 未认证请求返回 {e.code}")
+        print(f"  ✅ Unauthenticated request returned {e.code}")
 
 
 def test_invalid_token():
-    """无效 Token 应被拒绝"""
+    """Invalid token should be rejected."""
     bad_headers = {**HEADERS, "Authorization": "Bearer fake:fake"}
     payload = {
         "jsonrpc": "2.0", "id": 1,
@@ -461,28 +461,28 @@ def test_invalid_token():
         assert False, "Should have rejected invalid credentials"
     except urllib.error.HTTPError as e:
         assert e.code in (401, 403), f"Expected 401/403, got {e.code}"
-        print(f"  ✅ 无效 Token 返回 {e.code}")
+        print(f"  ✅ Invalid token returned {e.code}")
 
 
 def test_execute_query_syntax_error():
-    """SQL 语法错误应返回友好错误"""
+    """SQL syntax errors should return a friendly error."""
     result = _call_tool("execute_query", {"sql": "SELECTT 1"})
-    # 可能是 error response 或 success=false
+    # May be an error response or success=false.
     is_error = (
         result.get("isError") or
         ("error" in str(result).lower()) or
         ("syntax" in str(result).lower())
     )
     assert is_error, f"Should report syntax error: {result}"
-    print(f"  ✅ SQL 语法错误正确处理")
+    print("  ✅ SQL syntax error handled correctly")
 
 
 # ═══════════════════════════════════════════════════════
-#  端到端工作流测试
+#  End-to-end workflow test
 # ═══════════════════════════════════════════════════════
 
 def test_agent_workflow():
-    """模拟 AI Agent 的标准工作流: guide → health → databases → tables → query"""
+    """Simulate the standard AI Agent workflow: guide → health → databases → tables → query."""
     # Step 1: guide
     r1 = _call_tool("get_query_guide", {})
     assert "result" in r1
@@ -519,13 +519,13 @@ def test_agent_workflow():
     _assert_success(r6)
     print("  Step 6: execute_query ✅")
 
-    print("  🎉 完整 Agent 工作流通过!")
+    print("  🎉 Complete Agent workflow passed!")
 
 
 # ═══════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("=" * 60)
-    print("MCP Tool 测试开始")
+    print("MCP Tool tests starting")
     print(f"  URL: {MCP_URL}")
     print(f"  Workspace: {WORKSPACE}")
     print("=" * 60)
@@ -567,10 +567,10 @@ if __name__ == "__main__":
         ("execute_query (block write)", test_execute_query_blocked_write),
         # Tool #10
         ("reload_semantic_layer", test_reload_semantic_layer),
-        # 认证
+        # Auth
         ("auth required", test_auth_required),
         ("invalid token", test_invalid_token),
-        # 错误处理
+        # Error handling
         ("SQL syntax error", test_execute_query_syntax_error),
         # E2E
         ("Agent workflow", test_agent_workflow),
@@ -589,7 +589,7 @@ if __name__ == "__main__":
             print(f"  ❌ FAIL: {e}")
             failed += 1
         except Exception as e:
-            if "跳过" in str(e) or "not_ready" in str(e):
+            if "Skipped" in str(e) or "not_ready" in str(e):
                 print(f"  ⚠️ SKIP: {e}")
                 skipped += 1
             else:
@@ -597,7 +597,7 @@ if __name__ == "__main__":
                 failed += 1
 
     print(f"\n{'='*60}")
-    print(f"结果: {passed} passed, {failed} failed, {skipped} skipped")
+    print(f"Result: {passed} passed, {failed} failed, {skipped} skipped")
     print(f"{'='*60}")
 
     if failed > 0:
