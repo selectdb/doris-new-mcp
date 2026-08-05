@@ -11,8 +11,8 @@
 mcp_name = "doris-new-mcp"        # MCP 服务名称
 mcp_host = "0.0.0.0"              # HTTP 监听地址
 mcp_port = 3000                   # HTTP 监听端口
-fe_port = 9030                    # Doris FE MySQL 端口（同机 127.0.0.1）
-fe_host = "127.0.0.1"             # Doris FE 主机地址（同机部署保持 127.0.0.1）
+fe_port = 9030                    # Doris FE MySQL 端口
+fe_host = "127.0.0.1"             # Doris FE 地址；远程部署填写 FE 私网 IP 或域名
 
 # ---------------------------------------------------------------------------
 # 日志

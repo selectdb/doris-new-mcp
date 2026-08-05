@@ -253,8 +253,8 @@ def create_server(
 
     # Multi-workspace watcher (lazy — discovered on first request)
     from store.watcher import MultiWorkspaceWatcher
-    from store.store import set_doris_port
-    set_doris_port(cc.fe_mysql_port)
+    from store.store import set_doris_endpoint
+    set_doris_endpoint(cc.fe_host, cc.fe_mysql_port)
     multi_watcher = MultiWorkspaceWatcher(
         config_dir=_Path(config_path),
         workspace_root=_ws_root,
@@ -540,7 +540,7 @@ def create_server(
         username = access_token.client_id
         password = parts[1] if len(parts) > 1 else ""
         return await pool_manager.get_or_create_local_pool(
-            username, password, host=_MACHINE_IP,
+            username, password,
             on_auth_error=lambda: _credential_cache.clear(username, password),
         )
 
@@ -563,8 +563,7 @@ def create_server(
                 f"Cannot connect to Doris with the supplied credentials: {e}",
             )
 
-    # Fallback node identity for Doris connections and requests whose ASGI
-    # scope does not expose a usable local IPv4 address.
+    # MCP node identity for session affinity. Doris connections use fe_host.
     _MACHINE_IP = machine_ip if machine_ip is not None else resolve_machine_ip()
     _CONFIGURED_PRIVATE_IPS = get_configured_private_ips(_MACHINE_IP)
     logger.info("Configured private IPv4 addresses: %s", _CONFIGURED_PRIVATE_IPS)
@@ -576,7 +575,7 @@ def create_server(
             return False, False
         try:
             conn = pymysql.connect(
-                host=_MACHINE_IP, port=cc.fe_mysql_port,
+                host=cc.fe_host, port=cc.fe_mysql_port,
                 user=user, password=password,
                 charset="utf8mb4", connect_timeout=5,
             )

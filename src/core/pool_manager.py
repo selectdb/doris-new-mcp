@@ -2,7 +2,7 @@
 
 Manages independent connection pools for each authenticated Doris user.
 Pools are created lazily via get_or_create_local_pool and validated
-against Doris via non-127.0.0.1 machine IP (SELECT 1).
+against the configured Doris FE endpoint (SELECT 1).
 """
 
 from __future__ import annotations
@@ -39,8 +39,7 @@ class PoolManager:
     ) -> ConnectionPool:
         """Get or create a per-user pool.
 
-        ``host`` overrides the default cluster host — used for non-127.0.0.1
-        per-user connections while admin ops stay on 127.0.0.1.
+        ``host`` optionally overrides the configured Doris FE host.
 
         ``on_auth_error`` is called if a newly-created pool fails its first
         connection — used to invalidate the credential cache.
