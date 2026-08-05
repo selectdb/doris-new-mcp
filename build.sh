@@ -1,40 +1,40 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build.sh — doris-mcp-server / doris-mcp-client 构建脚本
+# build.sh — doris-mcp-server / doris-mcp-client build script
 #
-#   构建：  ./build.sh linux-x64        # Linux x86_64
-#          ./build.sh linux-arm64      # Linux ARM64 (信创)
+#   Build:  ./build.sh linux-x64        # Linux x86_64
+#          ./build.sh linux-arm64      # Linux ARM64
 #          ./build.sh macos-x64        # macOS Intel
 #          ./build.sh macos-arm64      # macOS Apple Silicon
-#          ./build.sh                  # 自动检测当前平台
+#          ./build.sh                  # auto-detect current platform
 #
-#   每次构建产出一个自包含全量包（server + client + 文档 + Python 运行时）：
+#   Each build produces one self-contained package (server + client + docs + Python runtime):
 #     dist/doris-mcp-server-{version}-{platform}.tar.gz
 #
-#   清理：  ./build.sh clean
+#   Clean:  ./build.sh clean
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_NAME="doris-mcp-server"
-# VERSION 环境变量优先；否则从 pyproject.toml 解析（版本号单一事实源）
+# VERSION takes precedence; otherwise parse pyproject.toml as the single version source.
 VERSION="${VERSION:-$(grep -m1 '^version' "$SCRIPT_DIR/pyproject.toml" | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')}"
 PYTHON_DIR="$SCRIPT_DIR/python"
 REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
 DIST_DIR="$SCRIPT_DIR/dist"
 
-# ── Python Standalone 配置 ───────────────────────────────────────────────
+# ── Python Standalone configuration ───────────────────────────────────────────────
 PY_STANDALONE_RELEASE="${PY_STANDALONE_RELEASE:-20250115}"
 PY_VERSION="${PY_VERSION:-3.10.16}"
 
-# ── 颜色 ────────────────────────────────────────────────────────────────
+# ── Colors ────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 _info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 _warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 _error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-# ── 平台解析 ────────────────────────────────────────────────────────────
-# 返回 "标签|下载标识"  e.g. "linux-x64|x86_64-unknown-linux-gnu"
+# ── Platform resolution ────────────────────────────────────────────────────────────
+# Return "label|download-id", e.g. "linux-x64|x86_64-unknown-linux-gnu".
 _resolve_platform() {
     case "$1" in
         linux-x64)    echo "linux-x64|x86_64-unknown-linux-gnu" ;;
@@ -73,10 +73,10 @@ _pip_platform_tag() {
 }
 
 # ════════════════════════════════════════════════════════════════════
-# _install_deps_cross — 交叉安装依赖（不执行目标平台二进制）
+# _install_deps_cross — cross-install dependencies without running target binaries
 #
-# pip --target 只是解压 wheel 到目录，不需要运行目标平台的解释器，
-# 因此可以在 macOS 上为 Linux 构建，反之亦然。
+# pip --target only extracts wheels into a directory and does not need to run
+# the target-platform interpreter, so macOS can build Linux packages and vice versa.
 # ════════════════════════════════════════════════════════════════════
 _install_deps_cross() {
     local platform_label="$1"
@@ -108,10 +108,10 @@ _install_deps_cross() {
 }
 
 # ════════════════════════════════════════════════════════════════════
-# _ensure_python — 确保 python/ 有 Python 3.10 + 全部依赖
+# _ensure_python — ensure python/ contains Python 3.10 and all dependencies
 #
-# 优先使用 DORIS_MCP_SYSTEM_PYTHON 指向的已有 Python（如 conda）
-# 然后尝试下载 python-build-standalone
+# Prefer an existing Python pointed to by DORIS_MCP_SYSTEM_PYTHON (e.g. conda),
+# then try downloading python-build-standalone.
 # ════════════════════════════════════════════════════════════════════
 _ensure_python() {
     local platform_label="$1"
@@ -151,7 +151,7 @@ _ensure_python() {
         py_ver=$("$DORIS_MCP_SYSTEM_PYTHON" --version 2>&1)
         _info "Python version: $py_ver"
 
-        # 打包瘦身路径硬编码 lib/python3.10，系统 Python 必须是 3.10.x
+        # Packaging and slimming paths hardcode lib/python3.10, so system Python must be 3.10.x.
         local py_major_minor
         py_major_minor=$("$DORIS_MCP_SYSTEM_PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
         if [ "$py_major_minor" != "3.10" ]; then
@@ -262,17 +262,17 @@ _ensure_python() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════
-# _pack — 打包单个目标
+# _pack — package one target
 # ═════════════════════════════════════════════════════════════════════════
 #
-# 用法: _pack <包名> <平台> <相对 SCRIPT_DIR 的路径...>
+# Usage: _pack <package-name> <platform> <paths relative to SCRIPT_DIR...>
 #
-# 通过 staging 目录打包，使解压后的顶层目录名 == 包名（如 doris-mcp-server/），
-# 与部署脚本的 ${WORK_DIR}/${name} 约定一致。
+# Package through a staging directory so the extracted top-level directory name
+# equals the package name (e.g. doris-mcp-server/), matching deployment scripts.
 _pack() {
     local name="$1"         # doris-mcp-server
     local platform="$2"
-    shift 2                 # 剩下的参数是相对 SCRIPT_DIR 的路径
+    shift 2                 # Remaining args are paths relative to SCRIPT_DIR.
     local pkg_platform="${platform//-/_}"   # linux-x64 → linux_x64
     local pkg_name="${name}-${VERSION}-${pkg_platform}"
     local outfile="$DIST_DIR/${pkg_name}.tar.gz"
@@ -284,13 +284,13 @@ _pack() {
     rm -rf "$stage"
     mkdir -p "$root"
 
-    # python/ 是所有包的公共部分
+    # python/ is shared by all packages.
     cp -a "$PYTHON_DIR" "$root/python"
     for item in "$@"; do
         cp -a "$SCRIPT_DIR/$item" "$root/"
     done
 
-    # 瘦身：移除不需要随包分发的内容
+    # Slim package contents by removing files that do not need distribution.
     rm -rf "$root/python/include" "$root/python/share" \
            "$root/python/lib/python3.10/test" \
            "$root/python/lib/python3.10/idlelib" \
@@ -306,14 +306,14 @@ _pack() {
 
     local size
     size="$(du -sh "$outfile" | cut -f1)"
-    echo "        ${pkg_name}.tar.gz  (${size})  →  解压为 ${name}/"
+    echo "        ${pkg_name}.tar.gz  (${size})  →  extracts to ${name}/"
 }
 
 # ═════════════════════════════════════════════════════════════════════════
-# build — 构建单个全量包（server + client + 文档 + Python 运行时）
+# build — build one full package (server + client + docs + Python runtime)
 #
-# 顶层目录名保持 doris-mcp-server/，与现有部署脚本的
-# ${WORK_DIR}/doris-mcp-server 约定一致，部署脚本无需改动。
+# The top-level directory remains doris-mcp-server/, matching existing
+# deployment scripts and requiring no deployment script changes.
 # ═════════════════════════════════════════════════════════════════════════
 build() {
     local platform_label="${1%%|*}"
@@ -321,7 +321,7 @@ build() {
 
     _ensure_python "$platform_label" "$platform_url"
 
-    # 不清空整个 dist/，让多个平台的包可以共存
+    # Do not clear all dist/ so packages for multiple platforms can coexist.
     mkdir -p "$DIST_DIR"
 
     _pack "doris-mcp-server" "$platform_label" \
