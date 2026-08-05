@@ -1,35 +1,35 @@
 # =============================================================================
-# mcp-server 配置文件 (TOML)
+# mcp-server configuration file (TOML)
 # =============================================================================
-# 传输模式：仅 streamable-http。
-# 配置值支持 ${VAR_NAME} 环境变量插值。
+# Transport mode: streamable-http only.
+# Values support ${VAR_NAME} environment-variable interpolation.
 
 # ---------------------------------------------------------------------------
-# 服务端
+# Server
 # ---------------------------------------------------------------------------
 [server]
-mcp_name = "doris-new-mcp"        # MCP 服务名称
-mcp_host = "0.0.0.0"              # HTTP 监听地址
-mcp_port = 3000                   # HTTP 监听端口
-fe_port = 9030                    # Doris FE MySQL 端口
-fe_host = "127.0.0.1"             # Doris FE 地址；远程部署填写 FE 私网 IP 或域名
+mcp_name = "doris-new-mcp"        # MCP service name
+mcp_host = "0.0.0.0"              # HTTP listen address
+mcp_port = 3000                   # HTTP listen port
+fe_port = 9030                    # Doris FE MySQL port
+fe_host = "127.0.0.1"             # Doris FE address; use the private FE IP or hostname for remote deployment
 
 # ---------------------------------------------------------------------------
-# 日志
+# Logging
 # ---------------------------------------------------------------------------
 [logging]
 level = "info"                    # debug / info / warning / error
-audit_log = "./logs/audit.log"    # 审计日志路径
-rotation_when = "midnight"        # 轮转策略: midnight / H / D / W0~W6
-rotation_backup_count = 30        # 保留的轮转文件数
+audit_log = "./logs/audit.log"    # Audit log path
+rotation_when = "midnight"        # Rotation policy: midnight / H / D / W0~W6
+rotation_backup_count = 30        # Number of rotated files to keep
 
 # ---------------------------------------------------------------------------
-# 查询
+# Query
 # ---------------------------------------------------------------------------
 [query]
-pool_min_size = 0                 # 连接池最小连接数（admin pool + per-user pool）
-pool_max_size = 10                # 连接池最大连接数
-pool_idle_timeout_seconds = 300   # 空闲连接超时回收（秒）；作为 aiomysql pool_recycle，应小于 Doris wait_timeout
-query_timeout_seconds = 600       # SQL 查询超时（秒）
-query_max_rows = 10000            # 单次查询最大返回行数
-db_whitelist = []                 # 数据库白名单；空列表表示不限制
+pool_min_size = 0                 # Minimum connection count (admin pool + per-user pool)
+pool_max_size = 10                # Maximum connection count
+pool_idle_timeout_seconds = 300   # Idle connection recycle timeout in seconds; as aiomysql pool_recycle, should be lower than Doris wait_timeout
+query_timeout_seconds = 600       # SQL query timeout in seconds
+query_max_rows = 10000            # Maximum rows returned by one query
+db_whitelist = []                 # Database allow-list; empty means unrestricted
