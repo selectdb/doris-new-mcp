@@ -43,6 +43,7 @@ logger = logging.getLogger("doris_new_mcp")
 
 _WEBUI_SESSION_COOKIE = "doris_mcp_session"
 _ADMIN_USER = "admin"
+_SEMANTIC_HUB_NAME = "Semantic Hub"
 
 # RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
 _IPV4_RFC1918_NETS = (
@@ -669,7 +670,7 @@ def create_server(
                     "success": False,
                     "error": {
                         "code": "UNAUTHORIZED",
-                        "message": "A valid Admin WebUI session is required.",
+                        "message": "A valid Semantic Hub admin session is required.",
                     },
                 },
                 status_code=401,
@@ -682,7 +683,7 @@ def create_server(
                     "success": False,
                     "error": {
                         "code": "UNAUTHORIZED",
-                        "message": "Admin WebUI session has expired.",
+                        "message": "The Semantic Hub admin session has expired.",
                     },
                 },
                 status_code=401,
@@ -694,7 +695,7 @@ def create_server(
                     "success": False,
                     "error": {
                         "code": "PERMISSION_DENIED",
-                        "message": "Only the Admin WebUI account can manage example.",
+                        "message": "Only the warehouse admin can manage the example in Semantic Hub.",
                     },
                 },
                 status_code=403,
@@ -1267,7 +1268,7 @@ def create_server(
 
     _SEMANTIC_LOGIN_HTML = """\
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{SERVER_NAME}} — Login</title><style>
+<title>{{SERVER_NAME}} | Log in</title><style>
   :root { --bg: #f5f5f5; --card: #fff; --text: #333; --muted: #888;
           --link: #1a73e8; --danger: #d93025; --border: #ddd; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1287,14 +1288,14 @@ def create_server(
   .error { background: #fce8e6; color: var(--danger); padding: 10px 14px;
            border-radius: 6px; margin-bottom: 16px; font-size: .85rem; }
 </style></head><body><div class="card"><h1>{{SERVER_NAME}}</h1>
-<p class="sub">Login with your Doris credentials</p>{{ERROR}}
+<p class="sub">Log in with your Doris credentials</p>{{ERROR}}
 <form method="post"><label>Username</label><input name="user" required autofocus>
 <label>Password</label><input name="password" type="password">
-<button type="submit">Sign in</button></form></div></body></html>"""
+<button type="submit">Log in</button></form></div></body></html>"""
 
     def _render_login(error: str = "") -> str:
         err_html = f'<div class="error">{error}</div>' if error else ""
-        return _SEMANTIC_LOGIN_HTML.replace("{{ERROR}}", err_html).replace("{{SERVER_NAME}}", cfg.mcp.name)
+        return _SEMANTIC_LOGIN_HTML.replace("{{ERROR}}", err_html).replace("{{SERVER_NAME}}", _SEMANTIC_HUB_NAME)
 
     @mcp.custom_route("/mcp/web/login", methods=["GET"])
     async def semantic_webui_login_page(request: Request) -> Response:
@@ -1347,7 +1348,7 @@ def create_server(
             "is_admin": is_admin,
         }
         logger.info(
-            "WebUI login: user='%s', session=%s..., private_ip=%s",
+            "Semantic Hub login: user='%s', session=%s..., private_ip=%s",
             user,
             session_id[:8],
             private_ip,
@@ -1671,7 +1672,7 @@ function wsAction(url,label) {
         delete_ws_btn = f'<button class="btn btn-sm btn-danger" onclick="deleteWorkspace(\'{workspace}\')" style="margin-left:4px;">🗑</button>' if is_admin and workspace != "example" else ""
         body = body.replace("{{WORKSPACE}}", workspace)
         html = _WEBUI_SHELL
-        html = html.replace("{{SERVER_NAME}}", cfg.mcp.name)
+        html = html.replace("{{SERVER_NAME}}", _SEMANTIC_HUB_NAME)
         html = html.replace("{{STYLE}}", _WEBUI_STYLE)
         html = html.replace("{{USER}}", user_display)
         html = html.replace("{{WORKSPACE_SELECTOR}}", ws_selector)
