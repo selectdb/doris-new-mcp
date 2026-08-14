@@ -43,7 +43,7 @@ logger = logging.getLogger("doris_new_mcp")
 
 _WEBUI_SESSION_COOKIE = "doris_mcp_session"
 _ADMIN_USER = "admin"
-_SEMANTIC_HUB_NAME = "Semantic Hub"
+_SEMANTIC_WEB_UI_NAME = "Semantic Web UI"
 
 # RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
 _IPV4_RFC1918_NETS = (
@@ -670,7 +670,7 @@ def create_server(
                     "success": False,
                     "error": {
                         "code": "UNAUTHORIZED",
-                        "message": "A valid Semantic Hub admin session is required.",
+                        "message": "A valid Semantic Web UI admin session is required.",
                     },
                 },
                 status_code=401,
@@ -683,7 +683,7 @@ def create_server(
                     "success": False,
                     "error": {
                         "code": "UNAUTHORIZED",
-                        "message": "The Semantic Hub admin session has expired.",
+                        "message": "The Semantic Web UI admin session has expired.",
                     },
                 },
                 status_code=401,
@@ -695,7 +695,7 @@ def create_server(
                     "success": False,
                     "error": {
                         "code": "PERMISSION_DENIED",
-                        "message": "Only the warehouse admin can manage the example in Semantic Hub.",
+                        "message": "Only the warehouse admin can manage the example in Semantic Web UI.",
                     },
                 },
                 status_code=403,
@@ -1295,7 +1295,7 @@ def create_server(
 
     def _render_login(error: str = "") -> str:
         err_html = f'<div class="error">{error}</div>' if error else ""
-        return _SEMANTIC_LOGIN_HTML.replace("{{ERROR}}", err_html).replace("{{SERVER_NAME}}", _SEMANTIC_HUB_NAME)
+        return _SEMANTIC_LOGIN_HTML.replace("{{ERROR}}", err_html).replace("{{SERVER_NAME}}", _SEMANTIC_WEB_UI_NAME)
 
     @mcp.custom_route("/mcp/web/login", methods=["GET"])
     async def semantic_webui_login_page(request: Request) -> Response:
@@ -1348,7 +1348,7 @@ def create_server(
             "is_admin": is_admin,
         }
         logger.info(
-            "Semantic Hub login: user='%s', session=%s..., private_ip=%s",
+            "Semantic Web UI login: user='%s', session=%s..., private_ip=%s",
             user,
             session_id[:8],
             private_ip,
@@ -1672,7 +1672,7 @@ function wsAction(url,label) {
         delete_ws_btn = f'<button class="btn btn-sm btn-danger" onclick="deleteWorkspace(\'{workspace}\')" style="margin-left:4px;">🗑</button>' if is_admin and workspace != "example" else ""
         body = body.replace("{{WORKSPACE}}", workspace)
         html = _WEBUI_SHELL
-        html = html.replace("{{SERVER_NAME}}", _SEMANTIC_HUB_NAME)
+        html = html.replace("{{SERVER_NAME}}", _SEMANTIC_WEB_UI_NAME)
         html = html.replace("{{STYLE}}", _WEBUI_STYLE)
         html = html.replace("{{USER}}", user_display)
         html = html.replace("{{WORKSPACE_SELECTOR}}", ws_selector)
