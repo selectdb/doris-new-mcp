@@ -115,7 +115,9 @@ def test_webui_login_page():
     status, body = _get("/mcp/web/login", headers={}, expect_code=200)
     assert "html" in str(body).lower() or "login" in str(body).lower(), \
         f"Should return login page: {str(body)[:200]}"
-    print("  ✅ Login page is accessible")
+    assert "Semantic Hub" in str(body), \
+        f"Login page should identify Semantic Hub: {str(body)[:200]}"
+    print("  ✅ Semantic Hub login page is accessible")
 
 
 def test_webui_login_post():

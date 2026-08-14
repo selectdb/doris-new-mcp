@@ -21,7 +21,7 @@ under the License.
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Doris MCP Server 是一个基于 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 的 [Apache Doris](https://doris.apache.org/) 查询服务。AI 客户端（Claude Desktop、Cursor、VS Code 等）通过内置的 **MetricFlow 语义指标层**以受治理的方式查询 Doris 数据，裸 SQL 作为兜底路径。附带管理语义模型的 Web UI 和脚本化 CLI 客户端。
+Doris MCP Server 是一个基于 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 的 [Apache Doris](https://doris.apache.org/) 查询服务。AI 客户端（Claude Desktop、Cursor、VS Code 等）通过内置的 **MetricFlow 语义指标层**以受治理的方式查询 Doris 数据，裸 SQL 作为兜底路径。附带管理语义模型的 **Semantic Hub** 和脚本化 CLI 客户端。
 
 ## 核心特性
 
@@ -30,9 +30,9 @@ Doris MCP Server 是一个基于 [Model Context Protocol (MCP)](https://modelcon
 *   **Staging 工作流**：所有模型变更必经 *staging → validate → commit*，错误模型永远不会影响线上查询。
 *   **引导式工具链**：10 个 MCP Tool，强制执行工作流（`get_query_guide` → `check_service_health` → 语义查询，或元数据发现 → 裸 SQL 兜底）。
 *   **凭据透传**：`Authorization: Bearer <doris用户>:<密码>`——每条 SQL 都以调用者自己的 Doris 身份执行，每用户独立连接池，无共享 admin 凭据。
-*   **Web UI**：Doris 凭据登录，在线编辑/验证/发布模型、管理工作区、一键部署示例，无需本地 YAML 工具链。
+*   **Semantic Hub**：使用 Doris 凭据登录，在线编辑、验证和发布模型，管理工作区并一键部署示例，无需本地 YAML 工具链。
 *   **CLI 客户端**：`mcp-client` 支持脚本和 CI/CD 中调用工具、推拉模型文件。
-*   **多机部署就绪**：会话亲和在应用层按 Web UI Cookie 中记录的服务端 IP 完成，nginx 只做哑代理。
+*   **多机部署就绪**：会话亲和在应用层按 Semantic Hub Cookie 中记录的服务端 IP 完成，nginx 只做哑代理。
 *   **自包含打包**：Release 包自带 Python 3.10 运行时和全部依赖，目标机器无需网络、pip 或系统 Python。
 
 ## 系统要求
@@ -108,7 +108,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
   --auth "<user>:<password>" --json
 ```
 
-### 4. 部署示例工作区（Web UI）
+### 4. 部署示例工作区（Semantic Hub）
 
 1. 浏览器打开 `http://<host>:3000/mcp/web`，用 Doris 凭据登录（管理操作固定使用 Doris `admin` 用户）。
 2. 点击 **example 部署** 按钮。部署在后台执行，页面自动轮询进度并在完成后跳转。
@@ -116,7 +116,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 5. 管理语义模型
 
-**Web UI**（`/mcp/web`）：新建/上传/编辑 YAML 模型 → **Validate** → **Commit**。只有验证通过的模型才会生效。
+**Semantic Hub**（`/mcp/web`）：新建/上传/编辑 YAML 模型 → **Validate** → **Commit**。只有验证通过的模型才会生效。
 
 **CLI 客户端：**
 
@@ -155,7 +155,7 @@ check_service_health()         ← 2. Doris 连通性 + 工作区状态
 
 ## 多机部署
 
-多台 MCP Server 挂在同一负载均衡后无需配置会话亲和。Web UI 首次登录成功时，如果 `server.mcp_host` 是具体 IPv4，就直接将该地址写入 Cookie；监听 `0.0.0.0` 时，才从当前请求的本地连接中取得实际到达的 IPv4。Cookie 格式为 `session_id.<服务端IP>`；后续请求若落到其他节点，中间件会转发到 Cookie 记录的节点。nginx 无需解析 Cookie，`/mcp` MCP 协议流量仍由各节点本地处理。详见 [DESIGN.md](DESIGN.md) §8.3。
+多台 MCP Server 挂在同一负载均衡后无需配置会话亲和。Semantic Hub 首次登录成功时，如果 `server.mcp_host` 是具体 IPv4，就直接将该地址写入 Cookie；监听 `0.0.0.0` 时，才从当前请求的本地连接中取得实际到达的 IPv4。Cookie 格式为 `session_id.<服务端IP>`；后续请求若落到其他节点，中间件会转发到 Cookie 记录的节点。nginx 无需解析 Cookie，`/mcp` MCP 协议流量仍由各节点本地处理。详见 [DESIGN.md](DESIGN.md) §8.3。
 
 ## 源码构建
 
