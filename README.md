@@ -21,7 +21,7 @@ under the License.
 
 [English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
-Doris MCP Server is a backend service that exposes [Apache Doris](https://doris.apache.org/) through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). AI clients (Claude Desktop, Cursor, VS Code, and others) can query Doris data through a governed **semantic metrics layer** built on [MetricFlow](https://github.com/dbt-labs/metricflow), with raw-SQL discovery as a fallback path. It ships with **Semantic Hub** for managing semantic models and a CLI client for scripting.
+Doris MCP Server is a backend service that exposes [Apache Doris](https://doris.apache.org/) through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). AI clients (Claude Desktop, Cursor, VS Code, and others) can query Doris data through a governed **semantic metrics layer** built on [MetricFlow](https://github.com/dbt-labs/metricflow), with raw-SQL discovery as a fallback path. It ships with **Semantic Web UI** for managing semantic models and a CLI client for scripting.
 
 ## Core Features
 
@@ -30,9 +30,9 @@ Doris MCP Server is a backend service that exposes [Apache Doris](https://doris.
 *   **Staging Workflow**: All model changes go through *staging → validate → commit*; broken models can never affect running queries.
 *   **Guided Tooling**: 10 MCP tools with an enforced workflow (`get_query_guide` → `check_service_health` → semantic query, or metadata discovery → raw SQL fallback).
 *   **Credential Pass-Through**: `Authorization: Bearer <doris-user>:<password>` — every query runs under the caller's own Doris identity with per-user connection pools. No shared admin credentials.
-*   **Semantic Hub**: Log in with Doris credentials to edit, validate, and publish models, manage workspaces, and deploy the bundled example. No local YAML tooling is required.
+*   **Semantic Web UI**: Log in with Doris credentials to edit, validate, and publish models, manage workspaces, and deploy the bundled example. No local YAML tooling is required.
 *   **CLI Client**: `mcp-client` for calling tools and pushing/pulling model files from scripts and CI/CD.
-*   **Multi-Node Ready**: Session affinity is handled in-app using the server IP recorded in the Semantic Hub cookie; nginx stays a plain reverse proxy.
+*   **Multi-Node Ready**: Session affinity is handled in-app using the server IP recorded in the Semantic Web UI cookie; nginx stays a plain reverse proxy.
 *   **Self-Contained Packaging**: Release tarballs bundle a Python 3.10 runtime and all dependencies. No network, no pip, no system Python required on target machines.
 
 ## System Requirements
@@ -108,7 +108,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
   --auth "<user>:<password>" --json
 ```
 
-### 4. Deploy the example workspace (Semantic Hub)
+### 4. Deploy the example workspace (Semantic Web UI)
 
 1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (management operations require the Doris `admin` user).
 2. Click the **example deploy** button. Deployment runs in the background; the page polls progress and redirects when done.
@@ -116,7 +116,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 5. Manage semantic models
 
-**Semantic Hub** (`/mcp/web`): create/upload/edit YAML models → **Validate** → **Commit**. Only validated models go live.
+**Semantic Web UI** (`/mcp/web`): create/upload/edit YAML models → **Validate** → **Commit**. Only validated models go live.
 
 **CLI client:**
 
@@ -155,7 +155,7 @@ All values support `${ENV_VAR}` interpolation.
 
 ## Multi-Node Deployment
 
-Multiple server nodes behind one load balancer work without an affinity configuration. On the first successful Semantic Hub login, a concrete `server.mcp_host` is written directly into the session cookie; when listening on `0.0.0.0`, the server instead reads the local IPv4 address on which the request arrived. The cookie format is `session_id.<server-ip>`. If a later request reaches another node, the middleware forwards it to the node recorded in the cookie. nginx needs no cookie parsing, and `/mcp` traffic stays node-local. See [DESIGN.md](DESIGN.md) §8.3 for details.
+Multiple server nodes behind one load balancer work without an affinity configuration. On the first successful Semantic Web UI login, a concrete `server.mcp_host` is written directly into the session cookie; when listening on `0.0.0.0`, the server instead reads the local IPv4 address on which the request arrived. The cookie format is `session_id.<server-ip>`. If a later request reaches another node, the middleware forwards it to the node recorded in the cookie. nginx needs no cookie parsing, and `/mcp` traffic stays node-local. See [DESIGN.md](DESIGN.md) §8.3 for details.
 
 ## Building from Source
 
