@@ -110,13 +110,13 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 4. 部署示例工作区（Semantic Web UI）
 
-1. 浏览器打开 `http://<host>:3000/mcp/web`，用 Doris 凭据登录（管理操作固定使用 Doris `admin` 用户）。
+1. 浏览器打开 `http://<host>:3000/mcp/web`，用 Doris 凭据登录（管理操作要求用户拥有 Doris `admin` 角色）。
 2. 点击 **example 部署** 按钮。部署在后台执行，页面自动轮询进度并在完成后跳转。
 3. 回到 AI 客户端提问：*"查询各渠道的订单总额"*——Agent 会发现 `example` 工作区，并调用 `total_amount` 等指标按 `channel` 分组查询。
 
 ### 5. 管理语义模型
 
-**Semantic Web UI**（`/mcp/web`）：新建/上传/编辑 YAML 模型 → **Validate** → **Commit**。只有验证通过的模型才会生效。
+**Semantic Web UI**（`/mcp/web`）：认证用户可以查看模型；拥有 Doris `admin` 角色的用户可以新建/上传/编辑 YAML 模型 → **Validate** → **Commit**。只有验证通过的模型才会生效。
 
 **CLI 客户端：**
 

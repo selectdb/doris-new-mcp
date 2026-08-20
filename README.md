@@ -110,13 +110,13 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 4. Deploy the example workspace (Semantic Web UI)
 
-1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (management operations require the Doris `admin` user).
+1. Open `http://<host>:3000/mcp/web` and log in with your Doris credentials (management operations require membership in the Doris `admin` role).
 2. Click the **example deploy** button. Deployment runs in the background; the page polls progress and redirects when done.
 3. Back in your AI client, ask: *"What is the total order amount by channel?"* — the agent will discover the `example` workspace and query metrics like `total_amount` grouped by `channel`.
 
 ### 5. Manage semantic models
 
-**Semantic Web UI** (`/mcp/web`): create/upload/edit YAML models → **Validate** → **Commit**. Only validated models go live.
+**Semantic Web UI** (`/mcp/web`): authenticated users can inspect models; users with the Doris `admin` role can create/upload/edit YAML models → **Validate** → **Commit**. Only validated models go live.
 
 **CLI client:**
 
