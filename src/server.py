@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -51,6 +52,48 @@ _IPV4_RFC1918_NETS = (
     ipaddress.IPv4Network("172.16.0.0/12"),
     ipaddress.IPv4Network("192.168.0.0/16"),
 )
+
+
+def _roles_include_admin(roles: object) -> bool:
+    """Return whether a SHOW GRANTS Roles value contains the admin role."""
+    if roles is None:
+        return False
+    role_names = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z0-9_]+", str(roles))
+    }
+    return "admin" in role_names
+
+
+def _doris_user_has_admin_role(conn: object, username: str) -> bool:
+    """Resolve Semantic Web UI edit access from the current Doris user.
+
+    SHOW GRANTS is deliberately executed without a FOR clause: every Doris
+    user may inspect their own effective grants, while inspecting another user
+    would require GRANT_PRIV.  Keep the built-in admin username as a fallback
+    for older Doris versions that do not expose a Roles column.
+    """
+    username_is_admin = username.lower() == _ADMIN_USER
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SHOW GRANTS")
+            columns = [str(item[0]).lower() for item in (cur.description or ())]
+            if "roles" not in columns:
+                return username_is_admin
+            roles_index = columns.index("roles")
+            return username_is_admin or any(
+                _roles_include_admin(row[roles_index])
+                for row in cur.fetchall()
+                if len(row) > roles_index
+            )
+    except Exception as exc:
+        logger.warning("Unable to resolve Doris roles for user '%s': %s", username, exc)
+        return username_is_admin
+
+
+def _session_has_admin_access(session: dict) -> bool:
+    """Read the role-derived authorization captured at Web UI login."""
+    return bool(session.get("is_admin", False))
 
 
 def _is_rfc1918_ipv4(ip: ipaddress.IPv4Address) -> bool:
@@ -587,18 +630,22 @@ def create_server(
         if _login_locked(user):
             # Same result as a wrong password — do not reveal lock state.
             return False, False
+        conn = None
         try:
             conn = pymysql.connect(
                 host=cc.fe_host, port=cc.fe_mysql_port,
                 user=user, password=password,
                 charset="utf8mb4", connect_timeout=5,
             )
-            conn.close()
+            is_admin = _doris_user_has_admin_role(conn, user)
             _record_login_success(user)
-            return True, (user == _ADMIN_USER)
+            return True, is_admin
         except Exception:
             _record_login_failure(user)
             return False, False
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _webui_redirect_login():
         from starlette.responses import RedirectResponse as _R
@@ -621,10 +668,10 @@ def create_server(
         if session and session["server_ip"] == server_ip:
             if time.time() - session["created_at"] < _SESSION_TTL:
                 client_id = session["doris_user"]
-                is_admin = (client_id == _ADMIN_USER)
+                is_admin = _session_has_admin_access(session)
                 if require_admin and not is_admin:
                     return None, False, JSONResponse(
-                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
+                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models."}},
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(client_id, session.get("doris_password", ""))
@@ -643,7 +690,7 @@ def create_server(
             if ok:
                 if require_admin and not is_admin:
                     return None, False, JSONResponse(
-                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only admin can modify semantic models."}},
+                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models."}},
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(username, password)
@@ -701,14 +748,13 @@ def create_server(
                 },
                 status_code=401,
             )
-        # The Doris admin username is fixed; its password remains request-scoped.
-        if not session.get("is_admin"):
+        if not _session_has_admin_access(session):
             return None, _JSONResponse(
                 {
                     "success": False,
                     "error": {
                         "code": "PERMISSION_DENIED",
-                        "message": "Only the warehouse admin can manage the example in Semantic Web UI.",
+                        "message": "Only users with the Doris admin role can manage the example in Semantic Web UI.",
                     },
                 },
                 status_code=403,
@@ -837,7 +883,7 @@ def create_server(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False)
     )
     async def execute_query(sql: str, database: str = "", max_rows: int = 0) -> str:
-        """Raw SQL fallback. Always returns error format — read the message to decide next step. If metrics exist for this query, switch to query_metric. If no matching metric, the data is in the error details. Supports SHOW/DESCRIBE, CTEs, JOINs, UNION ALL."""
+        """Raw SQL fallback. Always returns error format — read the message to decide next step. If metrics exist for this query, switch to query_metric. If no matching metric, the data is in the error details. Supports single-statement read-only Doris SQL, including Doris-specific SELECT syntax, SHOW/DESCRIBE, CTEs, JOINs, and UNION ALL."""
         auth = check_tool_access("execute_query")
         if auth.denied:
             return auth.denied
