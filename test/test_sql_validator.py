@@ -3,11 +3,11 @@
 Covers:
   - Allowed: SELECT / WITH / UNION / SHOW / DESC / DESCRIBE / EXPLAIN
   - Allowed: Doris full-text MATCH predicates and BM25 score() queries
+  - Allowed: future/unsupported Doris SELECT syntax through safe tokenization
   - Blocked: INSERT / UPDATE / DELETE / DROP / CREATE / GRANT / TRUNCATE / ALTER
   - Multiple statements (stacked queries) rejected
   - Comment-based bypass attempts rejected
   - Empty / whitespace-only input rejected
-  - Known behaviour: EXPLAIN/SHOW prefix check has no word boundary
 """
 
 from __future__ import annotations
@@ -105,6 +105,21 @@ class TestValidateReadonlyAllowed(unittest.TestCase):
             "ORDER BY bm25_score DESC LIMIT 10"
         )
 
+    def test_doris_tablet_and_tablesample_dialect(self):
+        self._assert_allowed(
+            "SELECT * FROM t1 TABLET(10001) "
+            "TABLESAMPLE(1000 ROWS) REPEATABLE 2 LIMIT 1000"
+        )
+
+    def test_show_create_table_remains_allowed(self):
+        self._assert_allowed("SHOW CREATE TABLE lease_chunks")
+
+    def test_dialect_fallback_ignores_keywords_in_literals_and_identifiers(self):
+        self._assert_allowed(
+            "SELECT `drop`, 'DELETE FROM t' AS sample_text "
+            "FROM t TABLET(10001) TABLESAMPLE(10 ROWS) REPEATABLE 2"
+        )
+
 
 class TestValidateReadonlyBlocked(unittest.TestCase):
     """Write / DDL / admin statements must be rejected."""
@@ -161,6 +176,22 @@ class TestValidateReadonlyBlocked(unittest.TestCase):
     def test_incomplete_match_is_rejected(self):
         self._assert_blocked("SELECT * FROM t WHERE content MATCH_PHRASE")
 
+    def test_doris_dialect_fallback_blocks_select_into_outfile(self):
+        self._assert_blocked("SELECT * FROM t INTO OUTFILE 's3://bucket/result'")
+
+    def test_unsupported_dialect_cannot_hide_stacked_write(self):
+        self._assert_blocked(
+            "SELECT * FROM t TABLET(10001) TABLESAMPLE(10 ROWS) REPEATABLE 2; "
+            "DROP TABLE t"
+        )
+
+    def test_unsupported_dialect_cte_cannot_end_in_delete(self):
+        self._assert_blocked(
+            "WITH sampled AS ("
+            "SELECT * FROM t TABLET(10001) TABLESAMPLE(10 ROWS) REPEATABLE 2"
+            ") DELETE FROM t"
+        )
+
 
 class TestValidateReadonlyEmpty(unittest.TestCase):
     def test_empty_inputs_rejected(self):
@@ -171,22 +202,14 @@ class TestValidateReadonlyEmpty(unittest.TestCase):
                 self.assertEqual(err, "Empty SQL statement")
 
 
-class TestValidateReadonlyPrefixNoWordBoundary(unittest.TestCase):
-    """Known current behaviour: the SHOW/DESC/EXPLAIN prefix fallback uses
-    str.startswith() without a word boundary, so any identifier starting
-    with one of these prefixes is accepted. This test documents the status
-    quo — do NOT 'fix' the test; if src changes to require a word boundary,
-    update these assertions accordingly."""
-
-    def test_explain_prefix_without_word_boundary_is_allowed(self):
-        # "EXPLAINXXX" is not a valid EXPLAIN statement, but the raw-text
-        # prefix check (sql_validator.py:70-73) accepts it anyway.
+class TestValidateReadonlyPrefixBoundary(unittest.TestCase):
+    def test_explain_prefix_requires_a_keyword_boundary(self):
         ok, _ = validate_readonly("EXPLAINXXX weird")
-        self.assertTrue(ok)
+        self.assertFalse(ok)
 
-    def test_show_prefix_without_word_boundary_is_allowed(self):
+    def test_show_prefix_requires_a_keyword_boundary(self):
         ok, _ = validate_readonly("SHOWxxx nonsense")
-        self.assertTrue(ok)
+        self.assertFalse(ok)
 
 
 class TestExecuteQueryMatchForwarding(unittest.IsolatedAsyncioTestCase):
