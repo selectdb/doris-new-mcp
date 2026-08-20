@@ -141,6 +141,8 @@ check_service_health()         ← 2. Doris connectivity + workspace status
                                   (raw SQL fallback, read-only validated)
 ```
 
+`execute_query` accepts single-statement read-only Doris SQL, including Doris-specific SELECT syntax that is not yet modeled by sqlglot. DML, DDL, stacked statements, and `SELECT INTO OUTFILE` remain blocked.
+
 ## Configuration (`mcp-server.toml`)
 
 | Key | Default | Description |

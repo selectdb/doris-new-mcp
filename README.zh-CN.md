@@ -141,6 +141,8 @@ check_service_health()         ← 2. Doris 连通性 + 工作区状态
                            （裸 SQL 兜底，只读校验）
 ```
 
+`execute_query` 支持单条只读 Doris SQL，包括 sqlglot 尚未建模的 Doris 专有 SELECT 语法；DML、DDL、多语句以及 `SELECT INTO OUTFILE` 仍会被拦截。
+
 ## 配置说明（`mcp-server.toml`）
 
 | 配置项 | 默认值 | 说明 |
