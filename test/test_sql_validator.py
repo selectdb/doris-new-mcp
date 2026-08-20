@@ -2,6 +2,7 @@
 
 Covers:
   - Allowed: SELECT / WITH / UNION / SHOW / DESC / DESCRIBE / EXPLAIN
+  - Allowed: Doris full-text MATCH predicates and BM25 score() queries
   - Blocked: INSERT / UPDATE / DELETE / DROP / CREATE / GRANT / TRUNCATE / ALTER
   - Multiple statements (stacked queries) rejected
   - Comment-based bypass attempts rejected
@@ -11,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +22,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from core.sql_validator import validate_readonly  # noqa: E402
+from tools.query import execute_query  # noqa: E402
 
 
 class TestValidateReadonlyAllowed(unittest.TestCase):
@@ -57,6 +60,50 @@ class TestValidateReadonlyAllowed(unittest.TestCase):
         """Comments around a legitimate SELECT do not change the verdict."""
         self._assert_allowed("/* comment */ SELECT 1")
         self._assert_allowed("-- comment\nSELECT 1")
+
+    def test_doris_full_text_match_operators(self):
+        for operator in (
+            "MATCH",
+            "MATCH_ANY",
+            "MATCH_ALL",
+            "MATCH_PHRASE",
+            "MATCH_PHRASE_PREFIX",
+            "MATCH_PHRASE_EDGE",
+            "MATCH_REGEXP",
+        ):
+            with self.subTest(operator=operator):
+                self._assert_allowed(
+                    f"SELECT * FROM lease_chunks WHERE content {operator} 'base rent'"
+                )
+
+    def test_match_in_select_cte_and_subquery(self):
+        self._assert_allowed(
+            "SELECT content MATCH_ANY 'rent' AS matched FROM lease_chunks LIMIT 1"
+        )
+        self._assert_allowed(
+            "WITH matched AS ("
+            "SELECT * FROM lease_chunks WHERE content MATCH_PHRASE 'base rent'"
+            ") SELECT * FROM matched"
+        )
+        self._assert_allowed(
+            "SELECT * FROM ("
+            "SELECT * FROM lease_chunks WHERE content MATCH_ALL 'base rent'"
+            ") AS matched"
+        )
+
+    def test_match_using_analyzer(self):
+        self._assert_allowed(
+            "SELECT * FROM lease_chunks "
+            "WHERE content match_phrase 'base rent' USING ANALYZER english"
+        )
+
+    def test_ranked_bm25_query(self):
+        self._assert_allowed(
+            "SELECT content, score() AS bm25_score "
+            "FROM lease_chunks "
+            "WHERE content MATCH_PHRASE 'Maximum Repair Obligation' "
+            "ORDER BY bm25_score DESC LIMIT 10"
+        )
 
 
 class TestValidateReadonlyBlocked(unittest.TestCase):
@@ -106,6 +153,14 @@ class TestValidateReadonlyBlocked(unittest.TestCase):
         self._assert_blocked("/* x */ DROP TABLE t")
         self._assert_blocked("DROP TABLE t -- trailing comment")
 
+    def test_match_does_not_allow_stacked_write(self):
+        self._assert_blocked(
+            "SELECT * FROM t WHERE content MATCH_ANY 'rent'; DROP TABLE t"
+        )
+
+    def test_incomplete_match_is_rejected(self):
+        self._assert_blocked("SELECT * FROM t WHERE content MATCH_PHRASE")
+
 
 class TestValidateReadonlyEmpty(unittest.TestCase):
     def test_empty_inputs_rejected(self):
@@ -132,6 +187,28 @@ class TestValidateReadonlyPrefixNoWordBoundary(unittest.TestCase):
     def test_show_prefix_without_word_boundary_is_allowed(self):
         ok, _ = validate_readonly("SHOWxxx nonsense")
         self.assertTrue(ok)
+
+
+class TestExecuteQueryMatchForwarding(unittest.IsolatedAsyncioTestCase):
+    async def test_original_bm25_sql_is_forwarded_unchanged(self):
+        sql = (
+            "SELECT content, score() AS bm25_score FROM lease_chunks "
+            "WHERE content MATCH_PHRASE 'Maximum Repair Obligation' "
+            "ORDER BY bm25_score DESC LIMIT 10"
+        )
+
+        class RecordingPool:
+            received_sql = ""
+
+            async def execute(self, received_sql, database=None, max_rows=None):
+                self.received_sql = received_sql
+                return [], ["content", "bm25_score"]
+
+        pool = RecordingPool()
+        result = json.loads(await execute_query(pool, sql))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(pool.received_sql, sql)
 
 
 if __name__ == "__main__":
