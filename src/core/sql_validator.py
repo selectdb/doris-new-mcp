@@ -4,6 +4,76 @@ from __future__ import annotations
 
 import sqlglot
 from sqlglot import exp
+from sqlglot.dialects.doris import Doris
+
+
+# sqlglot's Doris dialect does not currently model Doris full-text MATCH
+# predicates.  Keep the extension local to validation so execute_query still
+# sends the caller's original SQL to Doris unchanged.
+_DORIS_MATCH_OPERATORS = frozenset(
+    {
+        "MATCH",
+        "MATCH_ANY",
+        "MATCH_ALL",
+        "MATCH_PHRASE",
+        "MATCH_PHRASE_PREFIX",
+        "MATCH_PHRASE_EDGE",
+        "MATCH_REGEXP",
+    }
+)
+
+
+class _DorisMatch(exp.Expression, exp.Binary, exp.Predicate):
+    """AST node used only to validate Doris MATCH predicates."""
+
+    arg_types = {
+        "this": True,
+        "expression": True,
+        "operator": True,
+        "analyzer": False,
+    }
+
+
+class _DorisMatchParser(Doris.Parser):
+    """Doris parser with support for the full-text infix operator family."""
+
+    def _parse_range(self, this: exp.Expression | None = None) -> exp.Expression | None:
+        this = super()._parse_range(this)
+
+        while (
+            this is not None
+            and self._curr is not None
+            and self._curr.text.upper() in _DORIS_MATCH_OPERATORS
+        ):
+            operator = self._curr.text.upper()
+            self._advance()
+            expression = self._parse_bitwise()
+            if expression is None:
+                self.raise_error(f"Expected expression after {operator}")
+                return this
+
+            analyzer = None
+            if self._match_text_seq("USING", "ANALYZER"):
+                analyzer = self._parse_id_var()
+                if analyzer is None:
+                    self.raise_error("Expected analyzer name after USING ANALYZER")
+                    return this
+
+            this = self.expression(
+                _DorisMatch(
+                    this=this,
+                    expression=expression,
+                    operator=operator,
+                    analyzer=analyzer,
+                )
+            )
+
+        return this
+
+
+def _parse_doris(sql: str) -> list[exp.Expression | None]:
+    dialect = sqlglot.Dialect.get_or_raise("doris")
+    return _DorisMatchParser(dialect=dialect).parse(dialect.tokenize(sql), sql)
 
 # Statement types allowed for execute_query (read-only)
 _READONLY_TYPES = (
@@ -31,7 +101,7 @@ def validate_readonly(sql: str) -> tuple[bool, str]:
 
     # Check for multiple statements (stacked queries)
     try:
-        statements = sqlglot.parse(stripped, dialect="doris")
+        statements = _parse_doris(stripped)
     except sqlglot.errors.ParseError as e:
         # If sqlglot can't parse, fall back to prefix check for SHOW/DESC/EXPLAIN
         upper = stripped.upper().lstrip()
