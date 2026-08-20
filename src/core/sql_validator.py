@@ -77,13 +77,9 @@ _READONLY_TYPES = (
     exp.Union,
 )
 
-# Exact Doris metadata/query-plan commands allowed in read-only mode.
-_READONLY_COMMANDS = (
-    "SHOW",
-    "DESCRIBE",
-    "DESC",
-    "EXPLAIN",
-)
+# Exact Doris metadata commands allowed in read-only mode. EXPLAIN is handled
+# separately because its query block must also be read-only.
+_READONLY_METADATA_COMMANDS = frozenset({"SHOW", "DESCRIBE", "DESC"})
 
 
 class _DorisMatch(exp.Expression, exp.Binary, exp.Predicate):
@@ -160,6 +156,36 @@ def _top_level_statement(tokens: list[Token], start: int) -> str | None:
     return None
 
 
+def _nested_write_statement(tokens: list[Token]) -> str | None:
+    """Find a write statement used where Doris expects a nested query.
+
+    Write keywords are checked only at the head of a parenthesized expression
+    (or as the main statement of a nested WITH).  Checking every occurrence
+    would incorrectly reject read-only Doris functions such as REPLACE() and
+    INSERT().
+    """
+    stack: list[int] = []
+    for index, token in enumerate(tokens):
+        if token.token_type == TokenType.L_PAREN:
+            stack.append(index)
+            continue
+        if token.token_type != TokenType.R_PAREN or not stack:
+            continue
+
+        start = stack.pop()
+        nested = tokens[start + 1:index]
+        if not nested:
+            continue
+        first = _token_word(nested[0])
+        if first in _WRITE_KEYWORDS:
+            return first
+        if first == "WITH":
+            main_statement = _top_level_statement(nested, 1)
+            if main_statement in _WRITE_KEYWORDS:
+                return main_statement
+    return None
+
+
 def _validate_tokenized_readonly(sql: str) -> tuple[bool, str]:
     """Safely admit Doris read-only syntax that sqlglot does not yet model.
 
@@ -188,7 +214,7 @@ def _validate_tokenized_readonly(sql: str) -> tuple[bool, str]:
         return False, "Empty SQL statement"
 
     first = _token_word(tokens[0])
-    if first in _READONLY_COMMANDS:
+    if first in _READONLY_METADATA_COMMANDS:
         return True, ""
 
     if _token_word(tokens[-1]) in _DORIS_MATCH_OPERATORS:
@@ -214,14 +240,15 @@ def _validate_tokenized_readonly(sql: str) -> tuple[bool, str]:
     if main_statement != "SELECT":
         return False, f"Statement type '{main_statement or first}' not allowed in read-only mode"
 
+    nested_write = _nested_write_statement(tokens)
+    if nested_write:
+        return False, f"Statement type '{nested_write}' not allowed in read-only mode"
+
     words = [
         _token_word(token)
         for token in tokens
         if token.token_type not in _QUOTED_OR_LITERAL_TOKENS
     ]
-    for word in words:
-        if word in _WRITE_KEYWORDS:
-            return False, f"Keyword '{word}' not allowed in read-only mode"
 
     # Doris SELECT ... INTO OUTFILE writes query results outside the server.
     # It is not a read-only operation even though the statement starts SELECT.
@@ -257,17 +284,21 @@ def validate_readonly(sql: str) -> tuple[bool, str]:
 
     node = statements[0]
 
-    # SELECT statements are allowed
+    # Apply the same side-effect checks to AST-parsed and tokenizer-only Doris
+    # syntax. Some permissive parser paths can still produce a Select AST when
+    # a nested CTE contains a write statement.
     if isinstance(node, _READONLY_TYPES):
-        return True, ""
+        return _validate_tokenized_readonly(stripped)
 
     # Command nodes: SHOW, DESCRIBE, EXPLAIN etc.
     if isinstance(node, exp.Command):
         cmd = node.this
         if isinstance(cmd, str):
             command = cmd.upper().split(maxsplit=1)[0]
-            if command in _READONLY_COMMANDS:
+            if command in _READONLY_METADATA_COMMANDS:
                 return True, ""
+            if command == "EXPLAIN":
+                return _validate_tokenized_readonly(stripped)
 
     allowed, fallback_error = _validate_tokenized_readonly(stripped)
     if allowed:
