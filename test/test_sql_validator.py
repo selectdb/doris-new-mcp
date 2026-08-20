@@ -120,6 +120,17 @@ class TestValidateReadonlyAllowed(unittest.TestCase):
             "FROM t TABLET(10001) TABLESAMPLE(10 ROWS) REPEATABLE 2"
         )
 
+    def test_dialect_fallback_allows_functions_named_like_write_statements(self):
+        for expression in (
+            "REPLACE(name, 'old', 'new')",
+            "INSERT(name, 1, 2, 'new')",
+        ):
+            with self.subTest(expression=expression):
+                self._assert_allowed(
+                    f"SELECT {expression} FROM t TABLET(10001) "
+                    "TABLESAMPLE(10 ROWS) REPEATABLE 2"
+                )
+
 
 class TestValidateReadonlyBlocked(unittest.TestCase):
     """Write / DDL / admin statements must be rejected."""
@@ -191,6 +202,24 @@ class TestValidateReadonlyBlocked(unittest.TestCase):
             "SELECT * FROM t TABLET(10001) TABLESAMPLE(10 ROWS) REPEATABLE 2"
             ") DELETE FROM t"
         )
+
+    def test_explain_only_accepts_read_only_queries(self):
+        for sql in (
+            "EXPLAIN DELETE FROM t",
+            "EXPLAIN UPDATE t SET value = 1",
+            "EXPLAIN INSERT INTO t SELECT 1",
+        ):
+            with self.subTest(sql=sql):
+                self._assert_blocked(sql)
+
+    def test_nested_write_statement_is_rejected(self):
+        for sql in (
+            "WITH changed AS (DELETE FROM t) SELECT * FROM changed",
+            "SELECT * FROM (UPDATE t SET value = 1) AS changed",
+            "SELECT * FROM (WITH c AS (SELECT 1) DELETE FROM t) AS changed",
+        ):
+            with self.subTest(sql=sql):
+                self._assert_blocked(sql)
 
 
 class TestValidateReadonlyEmpty(unittest.TestCase):
