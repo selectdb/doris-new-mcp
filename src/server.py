@@ -883,7 +883,7 @@ def create_server(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False)
     )
     async def execute_query(sql: str, database: str = "", max_rows: int = 0) -> str:
-        """Raw SQL fallback. Always returns error format — read the message to decide next step. If metrics exist for this query, switch to query_metric. If no matching metric, the data is in the error details. Supports SHOW/DESCRIBE, CTEs, JOINs, UNION ALL."""
+        """Raw SQL fallback. Always returns error format — read the message to decide next step. If metrics exist for this query, switch to query_metric. If no matching metric, the data is in the error details. Supports single-statement read-only Doris SQL, including Doris-specific SELECT syntax, SHOW/DESCRIBE, CTEs, JOINs, and UNION ALL."""
         auth = check_tool_access("execute_query")
         if auth.denied:
             return auth.denied
