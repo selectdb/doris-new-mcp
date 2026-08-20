@@ -148,9 +148,19 @@ class WorkspaceState:
     known_revision: str = ""
     parsing: bool = False
 
+    # Last reload outcome — surfaced to callers instead of a generic message
+    last_reload_error: str = ""
+
     # Version tracking
     version_tracker: VersionTracker = field(default_factory=VersionTracker)
     rwlock: RWLock = field(default_factory=RWLock)
+
+    def is_ready(self) -> bool:
+        """True when the semantic layer is loaded AND the MetricFlow engine is
+        initialized. Single source of truth for every tool that needs the
+        layer — health, list_metrics, list_dimensions, query_metric — so they
+        can never disagree about whether the workspace is initialized."""
+        return bool(self.manifest and self.compiler and self.compiler.is_engine_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +400,7 @@ class MultiWorkspaceWatcher:
             ok, err = bootstrap(self._config_dir, ws.workspace_dir, models_dir=ws.models_dir)
             if not ok:
                 logger.error(f"[{ws.name}] Bootstrap failed: {err}. Keeping old version.")
+                ws.last_reload_error = str(err)
                 ws.version_tracker.mark_failure()
                 ws.known_revision = ws.store.check_remote().revision
                 return
@@ -427,6 +438,7 @@ class MultiWorkspaceWatcher:
                 last_reload_success=True,
             )
             ws.version_tracker.update(version)
+            ws.last_reload_error = ""
 
             # Rebuild global router
             self._router.rebuild(self._workspaces)
@@ -437,6 +449,7 @@ class MultiWorkspaceWatcher:
 
         except Exception as e:
             logger.exception(f"[{ws.name}] Reload failed: {e}")
+            ws.last_reload_error = str(e)
             ws.version_tracker.mark_failure()
         finally:
             ws.parsing = False
@@ -455,10 +468,12 @@ class MultiWorkspaceWatcher:
         ws.known_revision = ""
         self._reload_workspace(ws)
         # _reload_workspace handles its own exceptions internally;
-        # check the version tracker to determine success.
+        # check the version tracker to determine success. revision == "-1"
+        # is a failure sentinel Doris can report for an empty/tablet-less store
+        # — never present it inside a success envelope.
         ver = ws.version_tracker.current
-        if ver is None or not ver.last_reload_success:
-            return "failed", "Reload failed — check server logs for details"
+        if ver is None or not ver.last_reload_success or ver.revision == "-1":
+            return "failed", ws.last_reload_error or "Reload failed — check server logs for details"
         return "done", f"Reload completed ({ver.revision[:12]})"
 
     # ------------------------------------------------------------------

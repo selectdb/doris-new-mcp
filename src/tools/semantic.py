@@ -71,6 +71,10 @@ async def query_metric(
                     f"Call list_dimensions_for_metric('{metrics[0]}') to see valid dimensions. "
                     f"Original error: {error[:200]}"
                 )
+            # Engine unavailable is a readiness problem, not an internal fault —
+            # report the same SERVICE_NOT_READY signal the tool guard uses.
+            if "engine not available" in error.lower():
+                return error_response(ErrorCode.SERVICE_NOT_READY, error)
             return error_response(ErrorCode.INTERNAL_ERROR, f"MetricFlow compile error: {error}")
         if not sql:
             return error_response(ErrorCode.INTERNAL_ERROR, "MetricFlow returned empty SQL")

@@ -75,14 +75,26 @@ class MetricFlowCompiler:
         self._manifest_path = self._project_dir / "target" / "semantic_manifest.json"
         self._engine: Any = None
         self._engine_mode = False
+        self._init_error = ""
 
         if _ENGINE_AVAILABLE:
             self._try_init_engine()
+
+    @property
+    def init_error(self) -> str:
+        """Why the MetricFlow engine failed to initialize ("" if none).
+
+        Surfaced by check_service_health and reload errors so the underlying
+        cause (e.g. a missing agg_time_dimension) reaches the caller instead
+        of a generic 'check model YAML' hint.
+        """
+        return self._init_error
 
     def _try_init_engine(self) -> None:
         """Try to initialize the MetricFlow engine from cached manifest."""
         if not self._manifest_path.exists():
             logger.warning(f"Manifest not found at {self._manifest_path}, engine mode disabled")
+            self._init_error = f"Manifest not found at {self._manifest_path}"
             return
 
         try:
@@ -97,20 +109,24 @@ class MetricFlowCompiler:
                 sql_client=sql_client,
             )
             self._engine_mode = True
+            self._init_error = ""
             logger.info("MetricFlow engine initialized in compile-only mode (Doris dialect)")
         except Exception as e:
             logger.warning(f"Failed to init MetricFlow engine: {e}")
             self._engine_mode = False
+            self._init_error = str(e)
 
     def replace_with(self, other: "MetricFlowCompiler") -> None:
         """Atomically replace engine state from another compiler instance."""
         self._engine = other._engine
         self._engine_mode = other._engine_mode
+        self._init_error = other._init_error
 
     def reload(self) -> bool:
         """Reload manifest (after dbt parse + validate). Returns True on success."""
         self._engine = None
         self._engine_mode = False
+        self._init_error = ""
         if _ENGINE_AVAILABLE:
             self._try_init_engine()
         return self._engine_mode
