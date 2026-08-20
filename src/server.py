@@ -63,6 +63,19 @@ def _is_rfc1918_ipv4(ip: ipaddress.IPv4Address) -> bool:
     return any(ip in net for net in _IPV4_RFC1918_NETS)
 
 
+def _reload_error_code(msg: str) -> ErrorCode:
+    """Map a reload failure message to the most accurate error code.
+
+    Permission failures were previously hidden behind a generic INTERNAL_ERROR
+    ("Reload failed — check server logs"), which read as a server fault when
+    the real cause was the caller's credentials.
+    """
+    lowered = (msg or "").lower()
+    if any(k in lowered for k in ("permission", "denied", "privilege", "access", "forbidden", "grant")):
+        return ErrorCode.PERMISSION_DENIED
+    return ErrorCode.INTERNAL_ERROR
+
+
 def _encode_webui_session_cookie(session_id: str, server_ip: str) -> str:
     """Encode a Web UI session ID with the issuing server's IPv4 address."""
     if not session_id or "." in session_id:
@@ -890,18 +903,22 @@ def create_server(
             ws = multi_watcher.get_workspace(ws_name)
             if not ws:
                 continue
-            if ws.manifest and ws.compiler:
+            # ws.is_ready() is the same single source of truth the metric tools
+            # gate on, so health can never disagree with list_metrics/query_metric.
+            if ws.is_ready():
                 metrics = ws.manifest.list_metrics()
-                if ws.compiler.is_engine_mode:
-                    ws_statuses[ws_name] = {
-                        "status": "healthy",
-                        "metric_count": len(metrics),
-                    }
-                else:
-                    ws_statuses[ws_name] = {
-                        "status": "not_ready",
-                        "message": "Engine init failed — check model YAML (e.g., missing agg_time_dimension)",
-                    }
+                ws_statuses[ws_name] = {
+                    "status": "healthy",
+                    "metric_count": len(metrics),
+                }
+            elif ws.manifest and ws.compiler:
+                # Manifest loaded but the MetricFlow engine failed to initialize —
+                # surface the real cause, not a generic hint.
+                err = getattr(ws.compiler, "init_error", "") or "Engine init failed"
+                ws_statuses[ws_name] = {
+                    "status": "not_ready",
+                    "message": f"Engine init failed: {err}",
+                }
             else:
                 files = await asyncio.to_thread(ws.store.list_files)
                 if not files:
@@ -912,7 +929,7 @@ def create_server(
                 else:
                     ws_statuses[ws_name] = {
                         "status": "not_ready",
-                        "message": "Files present but failed to load",
+                        "message": ws.last_reload_error or "Files present but failed to load",
                     }
 
         health_data = {
@@ -943,7 +960,7 @@ def create_server(
             return auth.denied
         start = time.monotonic()
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
-        if not ws or not ws.manifest or not ws.compiler:
+        if not ws or not ws.is_ready():
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         result = await _list_metrics(ws.manifest, page_size, page_token or None)
         log_tool_call("list_metrics", client_id=auth.client_id,
@@ -960,7 +977,7 @@ def create_server(
             return auth.denied
         start = time.monotonic()
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
-        if not ws or not ws.manifest or not ws.compiler:
+        if not ws or not ws.is_ready():
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         result = await _list_dims(ws.manifest, metric_name)
         log_tool_call("list_dimensions_for_metric", client_id=auth.client_id, params={"metric_name": metric_name},
@@ -987,7 +1004,7 @@ def create_server(
             return auth.denied
         start = time.monotonic()
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
-        if not ws or not ws.manifest or not ws.compiler:
+        if not ws or not ws.is_ready():
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
         if group_by:
             group_by = ws.compiler.resolve_group_by(metrics, group_by)
@@ -1025,9 +1042,17 @@ def create_server(
         status, msg = await asyncio.to_thread(multi_watcher.force_reload, workspace)
         log_tool_call("reload_semantic_layer", client_id=auth.client_id,
                       success=(status == "done"), duration_ms=0, metricflow=True)
-        if status == "failed":
-            return error_response(ErrorCode.INTERNAL_ERROR, msg)
-        return success_response({"status": status, "message": msg})
+        # Only "done" (and idempotent "already_running") are successes. A
+        # failure must never ride inside a success:true envelope.
+        if status == "done":
+            return success_response({"status": status, "message": msg})
+        if status == "already_running":
+            # Informational — a reload is already in progress, not a failure
+            return success_response({"status": status, "message": msg})
+        if status == "rejected":
+            return error_response(ErrorCode.VALIDATION_ERROR, msg)
+        # status == "failed" — surface the underlying error, not a generic wrapper
+        return error_response(_reload_error_code(msg), msg)
 
 
     @mcp.custom_route("/mcp/web/semantic/reload", methods=["POST"])
@@ -1046,9 +1071,14 @@ def create_server(
         status, msg = await asyncio.to_thread(multi_watcher.force_reload, ws)
         log_tool_call("reload_semantic_layer", client_id=client_id,
                       success=(status == "done"), duration_ms=0, metricflow=True)
-        if status in ("rejected", "failed"):
-            return _JSONResponse({"success": False, "error": {"code": "RELOAD_FAILED", "message": msg}}, status_code=500)
-        return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
+        if status == "done":
+            return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
+        if status == "already_running":
+            return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
+        if status == "rejected":
+            return _JSONResponse({"success": False, "error": {"code": "VALIDATION_ERROR", "message": msg}}, status_code=400)
+        # failed — surface the underlying error and a 5xx so CI/CD sees a failure
+        return _JSONResponse({"success": False, "error": {"code": _reload_error_code(msg).value, "message": msg}}, status_code=500)
 
     @mcp.custom_route("/mcp/web/example/deployment", methods=["POST"])
     async def api_example_deployment(request: Request) -> Response:
