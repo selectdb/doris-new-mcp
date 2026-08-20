@@ -46,6 +46,43 @@ _WEBUI_SESSION_COOKIE = "doris_mcp_session"
 _ADMIN_USER = "admin"
 _SEMANTIC_WEB_UI_NAME = "Semantic Web UI"
 
+_SEMANTIC_MODE_POLICIES = {
+    "preferred": (
+        "Semantic-first mode is active. Check semantic health and use a matching "
+        "metric when one exists; use read-only SQL only when the semantic layer "
+        "cannot answer the request."
+    ),
+    "optional": (
+        "Optional semantic mode is active. Follow the user's requested query path. "
+        "Semantic tools load workspaces on demand, while metadata discovery and "
+        "read-only SQL may be used directly without checking the semantic layer first."
+    ),
+}
+
+
+def _semantic_mode_policy(mode: str) -> str:
+    """Return the model-facing query policy for a validated semantic mode."""
+    try:
+        return _SEMANTIC_MODE_POLICIES[mode]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported semantic mode: {mode}") from exc
+
+
+def _server_instructions_for_mode(mode: str) -> str:
+    return (
+        "IMPORTANT: Before any data query, call get_query_guide() to get the active "
+        f"workflow. Query mode: {mode}. {_semantic_mode_policy(mode)}"
+    )
+
+
+def _query_guide_for_mode(base_guide: str, mode: str) -> str:
+    """Attach the configured routing policy to the neutral query reference."""
+    return (
+        f"# Active query mode: `{mode}`\n\n"
+        f"> {_semantic_mode_policy(mode)}\n\n"
+        f"{base_guide}"
+    )
+
 # RFC 1918 private IPv4 networks (excludes loopback, link-local, etc.)
 _IPV4_RFC1918_NETS = (
     ipaddress.IPv4Network("10.0.0.0/8"),
@@ -290,6 +327,11 @@ def create_server(
     # so the TOML/dotenv files are read exactly once per process.
     cfg = config if config is not None else AppConfig(config_path, env_file=env_file)
     cc = cfg.cluster
+    semantic_mode = getattr(getattr(cfg, "semantic", None), "mode", "preferred")
+    if semantic_mode not in _SEMANTIC_MODE_POLICIES:
+        # Keep hand-built test/embedding configs from breaking; AppConfig
+        # validates real configuration files before create_server is called.
+        semantic_mode = "preferred"
 
     # Workspace directory
     workspace_dir = os.path.join(os.path.dirname(config_path), "workspace")
@@ -395,9 +437,13 @@ def create_server(
             logger.exception("Example deployment switch failed")
             _example_job.update(status="failed", message=str(exc))
 
-    async def _ensure_initialized(user: str, password: str) -> None:
-        """Initialize workspaces once authenticated credentials are available."""
+    async def _ensure_initialized(
+        user: str, password: str, *, explicit_semantic_use: bool = False,
+    ) -> None:
+        """Initialize semantic workspaces according to the configured mode."""
         nonlocal _watcher_initialized
+        if semantic_mode == "optional" and not explicit_semantic_use:
+            return
         from store.store import set_request_credentials as _set_creds
 
         _set_creds(user, password)
@@ -486,7 +532,10 @@ def create_server(
 
     auth_provider = CredentialVerifier(_credential_cache, _async_verify_credentials,
                                         on_authenticated=_ensure_initialized)
-    logger.info("Auth: CredentialVerifier registered (username:password, 10-min cache, lazy seed)")
+    logger.info(
+        "Auth: CredentialVerifier registered (username:password, 10-min cache, semantic=%s)",
+        semantic_mode,
+    )
 
     # Helper: get store for a workspace (defaults to "example")
     def _get_workspace_from_request(request: Request) -> str:
@@ -675,7 +724,11 @@ def create_server(
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(client_id, session.get("doris_password", ""))
-                await _ensure_initialized(client_id, session.get("doris_password", ""))
+                await _ensure_initialized(
+                    client_id,
+                    session.get("doris_password", ""),
+                    explicit_semantic_use=True,
+                )
                 return client_id, is_admin, None
             del _webui_sessions[session_id]
 
@@ -694,7 +747,9 @@ def create_server(
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(username, password)
-                await _ensure_initialized(username, password)
+                await _ensure_initialized(
+                    username, password, explicit_semantic_use=True
+                )
                 return username, is_admin, None
             return None, False, JSONResponse(
                 {"success": False, "error": {"code": "UNAUTHORIZED", "message": "Invalid credentials"}},
@@ -769,15 +824,11 @@ def create_server(
     try:
         from importlib.resources import files
         _query_guide = files("skills").joinpath("doris-mcp-skill.md").read_text(encoding="utf-8")
+        _query_guide = _query_guide_for_mode(_query_guide, semantic_mode)
     except Exception as e:
         logger.warning(f"Failed to load query guide: {e}")
 
-    _instructions = (
-        "IMPORTANT: Before any data query, call get_query_guide() to get the complete workflow. "
-        "Then call check_service_health() to see workspace status. "
-        "Each data query tool requires a workspace parameter — use 'example' to start. "
-        "Follow the guide strictly — do NOT improvise tool calling order."
-    )
+    _instructions = _server_instructions_for_mode(semantic_mode)
 
     @asynccontextmanager
     async def _lifespan(app: "FastMCP"):
@@ -804,7 +855,37 @@ def create_server(
 
     # ========== Base Tools (always registered) ==========
 
+    if semantic_mode == "preferred":
+        _discovery_description = (
+            "Physical Doris schema discovery. For governed metric queries, check "
+            "the semantic layer first and use this path only when no metric matches."
+        )
+        _execute_description = (
+            "Read-only raw Doris SQL fallback. Use after the semantic layer cannot "
+            "answer the request. DML, DDL, stacked statements, and OUTFILE are blocked."
+        )
+        _health_description = (
+            "Check Doris connectivity and eagerly initialized semantic workspaces. "
+            "Call after get_query_guide at the start of a query workflow."
+        )
+        _metric_description = "Semantic metric query tool; preferred when a matching metric exists."
+    else:  # optional
+        _discovery_description = (
+            "Discover physical Doris databases, tables, and columns directly. This path "
+            "may be used without loading or checking the semantic layer first."
+        )
+        _execute_description = (
+            "Execute single-statement read-only Doris SQL directly. Semantic loading is "
+            "not required; DML, DDL, stacked statements, and OUTFILE are blocked."
+        )
+        _health_description = (
+            "Check Doris connectivity and report any semantic workspaces already loaded "
+            "on demand; this check does not initialize the semantic layer."
+        )
+        _metric_description = "Optional semantic metric tool; loads the requested workspace on demand."
+
     @mcp.tool(
+        description="Return the configured query-routing policy and tool workflow.",
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def get_query_guide() -> str:
@@ -822,6 +903,7 @@ def create_server(
         return result
 
     @mcp.tool(
+        description=_discovery_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def list_databases(page_size: int = 50, page_token: str = "") -> str:
@@ -839,6 +921,7 @@ def create_server(
         return result
 
     @mcp.tool(
+        description=_discovery_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def list_tables(
@@ -861,6 +944,7 @@ def create_server(
         return result
 
     @mcp.tool(
+        description=_discovery_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def describe_table(database: str, table: str, detail_level: str = "summary") -> str:
@@ -880,6 +964,7 @@ def create_server(
         return result
 
     @mcp.tool(
+        description=_execute_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False)
     )
     async def execute_query(sql: str, database: str = "", max_rows: int = 0) -> str:
@@ -912,6 +997,7 @@ def create_server(
         return result
 
     @mcp.tool(
+        description=_health_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def check_service_health() -> str:
@@ -939,7 +1025,9 @@ def create_server(
         else:
             service_health.get("doris_connection").set_error(f"Connection failed: {db_error}")
 
-        # Ensure all known workspaces are loaded (on-demand)
+        # Refresh only workspaces that the configured mode has already loaded.
+        # In optional mode this deliberately does not discover/bootstrap the
+        # semantic layer merely because a health check was requested.
         for ws_name in multi_watcher.workspace_names():
             await asyncio.to_thread(multi_watcher.ensure_fresh, ws_name)
 
@@ -981,6 +1069,10 @@ def create_server(
         health_data = {
             "doris": "connected" if db_ok else "unavailable",
             "workspaces": ws_statuses,
+            "semantic": {
+                "mode": semantic_mode,
+                "status": "loaded" if multi_watcher.workspace_names() else "not_loaded",
+            },
         }
         if not db_ok:
             health_data["doris_error"] = db_error
@@ -989,14 +1081,10 @@ def create_server(
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
         return success_response(health_data)
 
-    # ========== Metric Layer Tools (always registered, gated at runtime) ==========
+    # ========== Metric Layer Tools (loaded on demand) ==========
 
-    from tools.semantic import (
-        list_metrics as _list_metrics,
-        list_dimensions_for_metric as _list_dims,
-        query_metric as _query_metric,
-    )
     @mcp.tool(
+        description=_metric_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def list_metrics(workspace: str, page_size: int = 50, page_token: str = "") -> str:
@@ -1008,12 +1096,14 @@ def create_server(
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
         if not ws or not ws.is_ready():
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
+        from tools.semantic import list_metrics as _list_metrics
         result = await _list_metrics(ws.manifest, page_size, page_token or None)
         log_tool_call("list_metrics", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=True)
         return result
 
     @mcp.tool(
+        description=_metric_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def list_dimensions_for_metric(workspace: str, metric_name: str) -> str:
@@ -1025,12 +1115,14 @@ def create_server(
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
         if not ws or not ws.is_ready():
             return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
+        from tools.semantic import list_dimensions_for_metric as _list_dims
         result = await _list_dims(ws.manifest, metric_name)
         log_tool_call("list_dimensions_for_metric", client_id=auth.client_id, params={"metric_name": metric_name},
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=True)
         return result
 
     @mcp.tool(
+        description=_metric_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False)
     )
     async def query_metric(
@@ -1063,6 +1155,7 @@ def create_server(
         if isinstance(pool, str):
             return pool
 
+        from tools.semantic import query_metric as _query_metric
         result = await _query_metric(ws.compiler, pool, metrics, group_by or None, where or None, order_by or None, limit or None, database or None, max_rows or None, having or None)
         duration = (time.monotonic() - start) * 1000
         success = '"success": true' in result
@@ -1075,6 +1168,7 @@ def create_server(
 
     # ========== Manual reload Tool ==========
     @mcp.tool(
+        description=_metric_description,
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def reload_semantic_layer(workspace: str) -> str:

@@ -66,6 +66,25 @@ class ClusterConfig:
         self.db_whitelist: list[str] = query.get("db_whitelist", []) or []
 
 
+class SemanticConfig:
+    """Semantic-layer loading and query-routing policy."""
+
+    VALID_MODES = frozenset({"preferred", "optional"})
+
+    def __init__(self, data: dict):
+        semantic = data.get("semantic", {}) or {}
+        self.mode: str = str(semantic.get("mode", "preferred")).strip().lower()
+        if self.mode not in self.VALID_MODES:
+            choices = ", ".join(sorted(self.VALID_MODES))
+            raise ValueError(
+                f"Invalid semantic.mode: '{self.mode}' (expected one of: {choices})"
+            )
+
+    @property
+    def initialize_on_auth(self) -> bool:
+        return self.mode == "preferred"
+
+
 class AppConfig:
     def __init__(self, config_dir: str | Path = "config", env_file: str | Path | None = None):
         config_dir = Path(config_dir)
@@ -90,5 +109,6 @@ class AppConfig:
 
         self.mcp = McpConfig(data)
         self.cluster = ClusterConfig(data.get("server", {}), data.get("query", {}) or {})
+        self.semantic = SemanticConfig(data)
         self.active_store = data.get("active_store", {}) or {}
         self.auth = None

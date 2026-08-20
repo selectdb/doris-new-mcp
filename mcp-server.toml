@@ -33,3 +33,11 @@ pool_idle_timeout_seconds = 300   # Idle connection recycle timeout in seconds; 
 query_timeout_seconds = 600       # SQL query timeout in seconds
 query_max_rows = 10000            # Maximum rows returned by one query
 db_whitelist = []                 # Database allow-list; empty means unrestricted
+
+# ---------------------------------------------------------------------------
+# Semantic query routing
+# ---------------------------------------------------------------------------
+[semantic]
+# preferred: load workspaces after authentication and use semantic metrics first
+# optional:  load semantic workspaces only when a semantic tool or Web UI is used
+mode = "preferred"

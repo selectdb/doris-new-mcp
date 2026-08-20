@@ -131,15 +131,8 @@ export DORIS_MCP_TOKEN=<user>:<password>
 
 ## Agent 查询数据的流程
 
-```
-get_query_guide()              ← 1. 获取工作流指引（必调）
-check_service_health()         ← 2. Doris 连通性 + 工作区状态
-    │
-    ├─ 语义层 healthy ──→ list_metrics → list_dimensions_for_metric → query_metric
-    │                      （计数、求和、比率、排名、趋势）
-    └─ 无匹配指标 ──────→ list_databases → list_tables → describe_table → execute_query
-                           （裸 SQL 兜底，只读校验）
-```
+查询路径由 `semantic.mode` 控制：`preferred` 保持语义层优先；`optional`
+仅在调用语义工具或 Web UI 时按需加载语义工作区，并允许直接执行只读 SQL。
 
 `execute_query` 支持单条只读 Doris SQL，包括 sqlglot 尚未建模的 Doris 专有 SELECT 语法；DML、DDL、多语句以及 `SELECT INTO OUTFILE` 仍会被拦截。
 
@@ -152,6 +145,7 @@ check_service_health()         ← 2. Doris 连通性 + 工作区状态
 | `query.db_whitelist` | `[]` | 可选的库白名单 |
 | `query.query_timeout_seconds` | `600` | SQL 查询超时 |
 | `query.query_max_rows` | `10000` | 单次查询最大返回行数 |
+| `semantic.mode` | `preferred` | `preferred` 或 `optional` 查询路由与加载策略 |
 
 所有配置值支持 `${ENV_VAR}` 环境变量插值。
 

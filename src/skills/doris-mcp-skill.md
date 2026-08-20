@@ -1,6 +1,6 @@
-# Doris MCP Query Skill
+# Doris MCP Query Reference
 
-> You are reading this because you called `get_query_guide()`. All tool-calling rules below are mandatory — follow them strictly.
+> The server prepends the active `preferred` or `optional` query policy to this reference. That active policy takes precedence over the general examples below.
 
 ## tl;dr — The Six Essential Tools
 
@@ -10,16 +10,18 @@ check_service_health()                   → which workspace is healthy?
 list_metrics(workspace)                  → what can I ask?
 list_dimensions_for_metric(workspace, name) → how can I slice it?
 query_metric(workspace, metrics, ...)    → give me the data
-execute_query(sql, ...)                  → raw SQL, last resort only
+execute_query(sql, ...)                  → strictly read-only Doris SQL
 ```
 
-`workspace` is required for the first three. Use `"example"` for the built-in sample.
+`workspace` is required for the three semantic metric tools. Use `"example"` for the built-in sample.
 
 ---
 
-## Step 0: Check Health (ALWAYS SECOND — get_query_guide was already called)
+## Step 0: Check Health
 
-Call this immediately after receiving this guide:
+In `preferred` mode, call this immediately after receiving the guide. In
+`optional` mode, call it when connectivity status is useful; it does not load
+the semantic layer.
 
 ```
 check_service_health()
@@ -38,11 +40,12 @@ Returns:
 }
 ```
 
-**Rules:**
-- Pick a workspace with `status: "healthy"` — only `query_metric` works there.
+**Semantic-query rules:**
+- Pick a workspace with `status: "healthy"` before calling `query_metric`.
 - If the user mentions a specific workspace, use it. Otherwise use `"example"`.
 - If `doris` is `"unavailable"`, warn the user. `list_databases` / `execute_query` may still work.
-- If NO workspace is healthy → fall back to raw SQL path (see bottom).
+- In `preferred` mode, if no workspace is healthy, use the raw SQL path.
+- In `optional` mode, do not initialize semantic workspaces unless the chosen query path needs them.
 
 ---
 
@@ -72,7 +75,9 @@ Returns:
 - "ordering users / purchasing users" → `unique_users`
 - "users / customer count" → `user_count`
 
-If the user's question doesn't clearly match any metric, call `list_metrics` and scan all descriptions. If nothing matches, fall back to raw SQL.
+When using the semantic path, if the user's question does not clearly match a
+metric, call `list_metrics` and scan the descriptions. If nothing matches, use
+the read-only SQL path.
 
 ---
 
@@ -203,21 +208,12 @@ order_by=["-total_amount", "channel"]  # multi-column
 
 ---
 
-## When to Use Raw SQL (execute_query)
+## When to Use Read-only SQL (`execute_query`)
 
-**Only two scenarios justify `execute_query`:**
+- `preferred`: use it when the semantic layer is unavailable or has no matching metric.
+- `optional`: use it directly when requested or when physical-schema exploration is the better path; no semantic health check is required first.
 
-### Scenario A — Semantic Layer Unavailable
-`check_service_health` returns NO workspace with `status: "healthy"`.
-
-### Scenario B — No Matching Metric
-Semantic layer IS healthy, but `list_metrics` shows nothing matching the user's intent.
-
-**CRITICAL RULE — NEVER skip the semantic layer when it can serve the query:**
-- If `check_service_health` shows at least one `healthy` workspace AND `list_metrics` has a matching metric → you MUST use `query_metric`. Do NOT write raw SQL.
-- Only fall back to `execute_query` when the semantic layer truly cannot help (Scenario A or B above).
-
-**In either case, follow this fallback path:**
+The SQL path is:
 
 ### Fallback: Raw SQL
 
@@ -228,7 +224,7 @@ describe_table(database="dw", table="orders") → check columns
 execute_query(sql="SELECT ... FROM dw.orders ...")
 ```
 
-**ALWAYS warn the user before using raw SQL:**
+In `preferred` mode, warn before falling back from governed metrics to raw SQL:
 
 > "No semantic metrics match your query. Results below come from raw SQL and may have incorrect aggregation or duplicate counting. Use with caution."
 
@@ -238,9 +234,9 @@ execute_query(sql="SELECT ... FROM dw.orders ...")
 
 | ❌ Don't | ✅ Do |
 |----------|------|
-| Skip `get_query_guide` or `check_service_health` | Always call them first — they tell you which workspace to use |
+| Ignore the active query mode | Follow the policy prepended by `get_query_guide` |
 | Forget `workspace` parameter | Every semantic tool requires it |
-| Use raw SQL when metrics exist | `list_metrics` → `query_metric` is always preferred |
+| Load semantics in `optional` mode without need | Use semantic tools only when that path is chosen |
 | Call `query_metric` before checking dimensions | `list_dimensions_for_metric` first to verify `group_by` values |
 | Write `having='{"x": 10}'` (JSON) | `having` takes plain SQL: `"x > 10"` |
 | Use `describe_table` to plan metric queries | Use `list_metrics` — metrics handle joins automatically |
