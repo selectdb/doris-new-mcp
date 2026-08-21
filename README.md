@@ -28,7 +28,7 @@ Doris MCP Server is a backend service that exposes [Apache Doris](https://doris.
 *   **Semantic Metrics Layer**: Define metrics once in YAML (simple / ratio / derived / cumulative / conversion), query them from any MCP client. MetricFlow compiles semantically correct SQL — no hand-written aggregation queries.
 *   **Multi-Workspace Isolation**: Fully isolated tenants with their own models, compiler, and Doris storage tables. Models are stored in Doris itself (`active` + `staging` tables), so multiple server nodes share state without file sync.
 *   **Staging Workflow**: All model changes go through *staging → validate → commit*; broken models can never affect running queries.
-*   **Guided Tooling**: 10 MCP tools with an enforced workflow (`get_query_guide` → `check_service_health` → semantic query, or metadata discovery → raw SQL fallback).
+*   **Guided Tooling**: 10 MCP tools with a reusable workflow (`get_query_guide` once per conversation → `check_service_health` → semantic query, or metadata discovery → raw SQL fallback).
 *   **Credential Pass-Through**: `Authorization: Bearer <doris-user>:<password>` — every query runs under the caller's own Doris identity with per-user connection pools. No shared admin credentials.
 *   **Semantic Web UI**: Log in with Doris credentials to edit, validate, and publish models, manage workspaces, and deploy the bundled example. No local YAML tooling is required.
 *   **CLI Client**: `mcp-client` for calling tools and pushing/pulling model files from scripts and CI/CD.
