@@ -120,12 +120,14 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 **CLI 客户端：**
 
+完整配置、命令、权限说明和故障排查见 [`MCP CLI 使用说明`](MCP-CLI.zh-CN.md)。
+
 ```bash
 export DORIS_MCP_SERVER=http://<host>:3000
 export DORIS_MCP_TOKEN=<user>:<password>
 
 ./mcp-client.sh semantic push ./models -w my_workspace
-./mcp-client.sh semantic pull -o ./backup -w my_workspace
+./mcp-client.sh semantic pull --output ./backup -w my_workspace
 ./mcp-client.sh tool call list_metrics --json '{"workspace":"my_workspace"}'
 ```
 
