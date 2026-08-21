@@ -135,6 +135,8 @@ The agent chooses the query path from the user's intent. Semantic metric tools
 load only the requested workspace on demand; direct read-only SQL, Doris search,
 and schema discovery do not initialize the semantic layer. Opening the Semantic
 Web UI is an explicit semantic-layer action and initializes its workspace view.
+`check_service_health` discovers workspace names with read-only metadata
+statements and reports unloaded workspaces without compiling them.
 
 `execute_query` accepts single-statement read-only Doris SQL, including Doris-specific SELECT syntax that is not yet modeled by sqlglot. DML, DDL, stacked statements, and `SELECT INTO OUTFILE` remain blocked.
 

@@ -815,8 +815,9 @@ def create_server(
         "required; DML, DDL, stacked statements, and OUTFILE are blocked."
     )
     _health_description = (
-        "Check Doris connectivity and report semantic workspaces already loaded on "
-        "demand; this check does not initialize the semantic layer."
+        "Check Doris connectivity and discover all semantic workspace names with "
+        "read-only metadata queries. Reports loaded state without initializing the "
+        "semantic layer."
     )
     _metric_description = (
         "Semantic metric tool; loads the requested workspace on demand when governed "
@@ -964,14 +965,32 @@ def create_server(
         else:
             service_health.get("doris_connection").set_error(f"Connection failed: {db_error}")
 
-        # Refresh only workspaces already loaded on demand. A health check must
-        # not discover or bootstrap the semantic layer merely by being called.
-        for ws_name in multi_watcher.workspace_names():
+        # Discover workspace names with read-only SHOW statements, but refresh
+        # only workspaces already loaded on demand. Health must never compile or
+        # initialize a semantic workspace merely by being called.
+        discovered_names: list[str] = []
+        discovery_error = ""
+        if db_ok:
+            try:
+                from store.store import DorisStore as _DorisStore
+                discovered_names = await asyncio.to_thread(
+                    _DorisStore.discover_workspaces
+                )
+            except Exception as exc:
+                discovery_error = str(exc)
+                logger.warning("Semantic workspace discovery failed: %s", exc)
+
+        loaded_names = set(multi_watcher.workspace_names())
+        for ws_name in loaded_names:
             await asyncio.to_thread(multi_watcher.ensure_fresh, ws_name)
 
         # Per-workspace status
-        ws_statuses: dict[str, dict] = {}
-        for ws_name in multi_watcher.workspace_names():
+        ws_statuses: dict[str, dict] = {
+            ws_name: {"status": "not_loaded"}
+            for ws_name in discovered_names
+            if ws_name not in loaded_names
+        }
+        for ws_name in sorted(loaded_names):
             ws = multi_watcher.get_workspace(ws_name)
             if not ws:
                 continue
@@ -1008,11 +1027,13 @@ def create_server(
             "doris": "connected" if db_ok else "unavailable",
             "workspaces": ws_statuses,
             "semantic": {
-                "status": "loaded" if multi_watcher.workspace_names() else "not_loaded",
+                "status": "loaded" if loaded_names else "not_loaded",
             },
         }
         if not db_ok:
             health_data["doris_error"] = db_error
+        if discovery_error:
+            health_data["semantic"]["discovery_error"] = discovery_error
 
         log_tool_call("check_service_health", client_id=auth.client_id,
                       duration_ms=(time.monotonic() - start) * 1000, metricflow=False)
