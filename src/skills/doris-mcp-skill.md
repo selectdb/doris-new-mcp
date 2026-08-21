@@ -2,11 +2,13 @@
 
 > Choose the query path from the user's intent. Semantic workspaces load only
 > when a semantic tool or the Semantic Web UI is used.
+> This guide is fetched once per conversation context. Reuse it for follow-up
+> queries instead of calling `get_query_guide` again.
 
 ## tl;dr — The Six Essential Tools
 
 ```
-get_query_guide()                        → you are here (already called)
+get_query_guide()                        → call once per conversation context
 check_service_health()                   → Doris and already-loaded semantic health
 list_metrics(workspace)                  → what can I ask?
 list_dimensions_for_metric(workspace, name) → how can I slice it?
@@ -15,6 +17,10 @@ execute_query(sql, ...)                  → strictly read-only Doris SQL
 ```
 
 `workspace` is required for the three semantic metric tools. Use `"example"` for the built-in sample.
+
+Call `get_query_guide` again only when starting a new conversation or when a
+context reset/compaction removed this guide. Changing databases, workspaces, or
+query paths within the same context does not require another call.
 
 ---
 
