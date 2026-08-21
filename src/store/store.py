@@ -143,17 +143,26 @@ class DorisStore:
 
     @classmethod
     def discover_workspaces(cls) -> list[str]:
-        """Scan system_mcp for all active_store_* tables, return workspace names."""
+        """Read available workspaces without creating databases or tables."""
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DORIS_DB}")
-                cur.execute(f"USE {_DORIS_DB}")
-                cur.execute("SHOW TABLES LIKE 'active_store_%'")
+                cur.execute("SHOW DATABASES")
+                databases = {str(row[0]).lower() for row in cur.fetchall()}
+                if _DORIS_DB.lower() not in databases:
+                    return []
+                cur.execute(
+                    f"SHOW TABLES FROM `{_DORIS_DB}` LIKE 'active_store_%'"
+                )
                 tables = [r[0] for r in cur.fetchall()]
         finally:
             conn.close()
-        return [t[len("active_store_"):] for t in tables]
+        prefix = "active_store_"
+        return sorted(
+            str(table)[len(prefix):]
+            for table in tables
+            if str(table).startswith(prefix)
+        )
 
     @classmethod
     def drop_workspace_tables(cls, workspace: str) -> None:
