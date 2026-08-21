@@ -34,12 +34,10 @@ class CredentialVerifier(TokenVerifier):
         self,
         cache: CredentialCache,
         verify_fn: Callable[[str, str], Awaitable[bool]],
-        on_authenticated: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(required_scopes=[])
         self._cache = cache
         self._verify_fn = verify_fn
-        self._on_authenticated = on_authenticated
         logger.info("CredentialVerifier initialized (10-min credential cache)")
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -63,8 +61,6 @@ class CredentialVerifier(TokenVerifier):
             logger.debug("Credential cache HIT for user '%s'", username)
             from store.store import set_request_credentials
             set_request_credentials(username, password)
-            if self._on_authenticated:
-                await self._on_authenticated(username, password)
             return AccessToken(
                 token=token,
                 client_id=username,
@@ -89,8 +85,6 @@ class CredentialVerifier(TokenVerifier):
         logger.info("Doris authentication OK for user '%s' (cached for 10 min)", username)
         from store.store import set_request_credentials
         set_request_credentials(username, password)
-        if self._on_authenticated:
-            await self._on_authenticated(username, password)
         return AccessToken(
             token=token,
             client_id=username,
