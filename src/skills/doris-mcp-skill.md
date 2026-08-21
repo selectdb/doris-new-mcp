@@ -1,12 +1,13 @@
 # Doris MCP Query Reference
 
-> The server prepends the active `preferred` or `optional` query policy to this reference. That active policy takes precedence over the general examples below.
+> Choose the query path from the user's intent. Semantic workspaces load only
+> when a semantic tool or the Semantic Web UI is used.
 
 ## tl;dr — The Six Essential Tools
 
 ```
 get_query_guide()                        → you are here (already called)
-check_service_health()                   → which workspace is healthy?
+check_service_health()                   → Doris and already-loaded semantic health
 list_metrics(workspace)                  → what can I ask?
 list_dimensions_for_metric(workspace, name) → how can I slice it?
 query_metric(workspace, metrics, ...)    → give me the data
@@ -19,9 +20,8 @@ execute_query(sql, ...)                  → strictly read-only Doris SQL
 
 ## Step 0: Check Health
 
-In `preferred` mode, call this immediately after receiving the guide. In
-`optional` mode, call it when connectivity status is useful; it does not load
-the semantic layer.
+Call this when connectivity or already-loaded semantic status is useful. It
+does not discover, compile, or load semantic workspaces.
 
 ```
 check_service_health()
@@ -44,8 +44,8 @@ Returns:
 - Pick a workspace with `status: "healthy"` before calling `query_metric`.
 - If the user mentions a specific workspace, use it. Otherwise use `"example"`.
 - If `doris` is `"unavailable"`, warn the user. `list_databases` / `execute_query` may still work.
-- In `preferred` mode, if no workspace is healthy, use the raw SQL path.
-- In `optional` mode, do not initialize semantic workspaces unless the chosen query path needs them.
+- Calling a semantic tool loads only its requested workspace on demand.
+- Do not initialize semantic workspaces unless the chosen query path needs them.
 
 ---
 
@@ -210,8 +210,9 @@ order_by=["-total_amount", "channel"]  # multi-column
 
 ## When to Use Read-only SQL (`execute_query`)
 
-- `preferred`: use it when the semantic layer is unavailable or has no matching metric.
-- `optional`: use it directly when requested or when physical-schema exploration is the better path; no semantic health check is required first.
+- Use it directly for explicit SQL, Doris full-text search, or physical-schema exploration.
+- Use it when the semantic layer is unavailable or has no matching metric.
+- No semantic health check is required before the raw SQL path.
 
 The SQL path is:
 
@@ -224,7 +225,7 @@ describe_table(database="dw", table="orders") → check columns
 execute_query(sql="SELECT ... FROM dw.orders ...")
 ```
 
-In `preferred` mode, warn before falling back from governed metrics to raw SQL:
+When falling back from governed metrics to raw SQL, warn:
 
 > "No semantic metrics match your query. Results below come from raw SQL and may have incorrect aggregation or duplicate counting. Use with caution."
 
@@ -234,9 +235,8 @@ In `preferred` mode, warn before falling back from governed metrics to raw SQL:
 
 | ❌ Don't | ✅ Do |
 |----------|------|
-| Ignore the active query mode | Follow the policy prepended by `get_query_guide` |
 | Forget `workspace` parameter | Every semantic tool requires it |
-| Load semantics in `optional` mode without need | Use semantic tools only when that path is chosen |
+| Load semantics without need | Use semantic tools only when that path is chosen |
 | Call `query_metric` before checking dimensions | `list_dimensions_for_metric` first to verify `group_by` values |
 | Write `having='{"x": 10}'` (JSON) | `having` takes plain SQL: `"x > 10"` |
 | Use `describe_table` to plan metric queries | Use `list_metrics` — metrics handle joins automatically |

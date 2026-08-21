@@ -131,9 +131,10 @@ export DORIS_MCP_TOKEN=<user>:<password>
 
 ## How the Agent Queries Data
 
-The configured `semantic.mode` controls routing. `preferred` keeps the governed
-semantic-first workflow; `optional` loads a semantic workspace only when a
-semantic tool or the Web UI is used and permits direct read-only SQL.
+The agent chooses the query path from the user's intent. Semantic metric tools
+load only the requested workspace on demand; direct read-only SQL, Doris search,
+and schema discovery do not initialize the semantic layer. Opening the Semantic
+Web UI is an explicit semantic-layer action and initializes its workspace view.
 
 `execute_query` accepts single-statement read-only Doris SQL, including Doris-specific SELECT syntax that is not yet modeled by sqlglot. DML, DDL, stacked statements, and `SELECT INTO OUTFILE` remain blocked.
 
@@ -146,7 +147,6 @@ semantic tool or the Web UI is used and permits direct read-only SQL.
 | `query.db_whitelist` | `[]` | Optional database allow-list |
 | `query.query_timeout_seconds` | `600` | SQL query timeout |
 | `query.query_max_rows` | `10000` | Max rows per query |
-| `semantic.mode` | `preferred` | `preferred` or `optional` query routing and loading policy |
 
 All values support `${ENV_VAR}` interpolation.
 
