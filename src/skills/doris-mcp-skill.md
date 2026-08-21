@@ -7,7 +7,7 @@
 
 ```
 get_query_guide()                        → you are here (already called)
-check_service_health()                   → Doris and already-loaded semantic health
+check_service_health()                   → Doris health and all semantic workspaces
 list_metrics(workspace)                  → what can I ask?
 list_dimensions_for_metric(workspace, name) → how can I slice it?
 query_metric(workspace, metrics, ...)    → give me the data
@@ -20,8 +20,9 @@ execute_query(sql, ...)                  → strictly read-only Doris SQL
 
 ## Step 0: Check Health
 
-Call this when connectivity or already-loaded semantic status is useful. It
-does not discover, compile, or load semantic workspaces.
+Call this when connectivity or semantic workspace status is useful. It
+discovers workspace names with read-only metadata statements, but does not
+compile or load semantic workspaces.
 
 ```
 check_service_health()
@@ -34,8 +35,9 @@ Returns:
   "doris": "connected",
   "workspaces": {
     "example":   {"status": "healthy",    "metric_count": 5},
+    "finance":   {"status": "not_loaded"},
     "marketing": {"status": "no_models",  "message": "No YAML files"},
-    "finance":   {"status": "not_ready",  "message": "Files present but failed to load"}
+    "sales":     {"status": "not_ready",  "message": "Files present but failed to load"}
   }
 }
 ```
