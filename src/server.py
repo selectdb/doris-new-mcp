@@ -47,7 +47,9 @@ _ADMIN_USER = "admin"
 _SEMANTIC_WEB_UI_NAME = "Semantic Web UI"
 
 _SERVER_INSTRUCTIONS = (
-    "IMPORTANT: Before any data query, call get_query_guide() to get the workflow. "
+    "IMPORTANT: In each conversation context, call get_query_guide() once before "
+    "the first data query. Reuse that guide for every later query in the same "
+    "context; call it again only after a new or reset context. "
     "Choose semantic metric tools when governed business metrics are relevant, and "
     "use read-only SQL for explicit SQL, schema exploration, search queries, or when "
     "no semantic metric matches. Semantic workspaces load only when semantic tools "
@@ -824,11 +826,19 @@ def create_server(
     )
 
     @mcp.tool(
-        description="Return the automatic query-routing and tool workflow guide.",
+        description=(
+            "Return the automatic query-routing and tool workflow guide. Call once "
+            "per conversation context and reuse it for subsequent queries."
+        ),
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     )
     async def get_query_guide() -> str:
-        """CALL THIS FIRST before any data query. Returns the complete workflow guide: health check procedure, metric layer vs basic SQL routing, tool calling order, search strategies, and query syntax. Without this guide you will use tools incorrectly."""
+        """Call once before the first data query in a conversation context.
+
+        Returns the complete workflow guide: health checks, semantic versus raw SQL
+        routing, tool order, search strategies, and query syntax. Reuse the result
+        for later queries in the same context.
+        """
         auth = check_tool_access("get_query_guide")
         if auth.denied:
             return auth.denied

@@ -30,6 +30,11 @@ class TestSemanticInstructions(unittest.TestCase):
         self.assertIn("read-only SQL", _SERVER_INSTRUCTIONS)
         self.assertNotIn("query mode", _SERVER_INSTRUCTIONS.lower())
 
+    def test_query_guide_is_requested_once_per_conversation(self):
+        self.assertIn("once before the first data query", _SERVER_INSTRUCTIONS)
+        self.assertIn("Reuse that guide", _SERVER_INSTRUCTIONS)
+        self.assertNotIn("Before any data query", _SERVER_INSTRUCTIONS)
+
 
 class TestSemanticToolDescriptions(unittest.IsolatedAsyncioTestCase):
     def _server(self):
@@ -54,6 +59,13 @@ class TestSemanticToolDescriptions(unittest.IsolatedAsyncioTestCase):
     async def test_server_auth_does_not_eagerly_initialize_semantics(self):
         server = self._server()
         self.assertFalse(hasattr(server.auth, "_on_authenticated"))
+
+    async def test_query_guide_tool_is_described_as_once_per_context(self):
+        server = self._server()
+        query_guide = await server.get_tool("get_query_guide")
+
+        self.assertIn("once per conversation context", query_guide.description)
+        self.assertIn("Call once before the first data query", query_guide.fn.__doc__)
 
 
 if __name__ == "__main__":
