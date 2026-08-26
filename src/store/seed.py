@@ -381,6 +381,11 @@ def seed_example_models() -> bool:
 
     finally:
         conn.close()
+    if performed:
+        # Direct active-store writes bypass staging_commit(), so publish an
+        # explicit semantic version for every MCP node to observe.
+        from store.store import DorisStore
+        DorisStore("example").bump_semantic_version()
     return performed
 
 
@@ -412,6 +417,14 @@ def delete_example() -> None:
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    "DELETE FROM system_mcp.workspace_metadata WHERE workspace = 'example'"
+                )
+            except Exception:
+                # Backward-compatible with deployments created before the
+                # metadata table existed.
+                pass
             cur.execute("DROP TABLE IF EXISTS system_mcp.staging_store_example")
             cur.execute("DROP TABLE IF EXISTS system_mcp.active_store_example")
             for table in sorted(EXAMPLE_DATA_TABLES):
