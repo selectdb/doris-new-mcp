@@ -39,9 +39,9 @@ Returns:
 {
   "doris": "connected",
   "workspaces": {
-    "example":   {"status": "healthy",    "metric_count": 5},
+    "example":   {"status": "healthy",    "metric_count": 5, "semantic_enabled": true, "semantic_version": 12, "loaded_version": 12},
     "marketing": {"status": "no_models",  "message": "No YAML files"},
-    "finance":   {"status": "not_ready",  "message": "Files present but failed to load"}
+    "finance":   {"status": "disabled", "semantic_enabled": false, "semantic_version": 7, "loaded_version": 6}
   }
 }
 ```
@@ -52,6 +52,8 @@ Returns:
 - If `doris` is `"unavailable"`, warn the user. `list_databases` / `execute_query` may still work.
 - Calling a semantic tool loads only its requested workspace on demand.
 - Do not initialize semantic workspaces unless the chosen query path needs them.
+- `status: "disabled"` means semantic MCP tools are unavailable for that workspace; use read-only SQL or ask a Doris `admin` role user to enable **Semantic queries** in Web UI.
+- Every semantic tool checks the published workspace version and reloads before querying when `semantic_version` differs from `loaded_version`.
 
 ---
 
