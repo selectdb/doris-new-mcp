@@ -232,13 +232,14 @@ GET  /mcp/web/logout → 清除会话和 Cookie
 
 **命名规范：** `^[a-zA-Z][a-zA-Z0-9_]*$`
 
-### 5.2 工作区三种状态
+### 5.2 工作区状态
 
 | 状态 | 含义 | 触发条件 |
 |------|------|----------|
 | `healthy` | 正常运行，指标可查询 | YAML 已提交成功，bootstrap 解析通过，MetricFlow 引擎就绪 |
 | `no_models` | 空工作区 | 新创建，或所有文件已删除 |
 | `not_ready` | 加载失败 | YAML 语法错误、表不存在、缺少 project.yaml、MetricFlow 校验失败 |
+| `disabled` | 语义查询已关闭 | Doris `admin` 角色用户在 Web UI 关闭 `semantic_enabled` |
 
 ```
   no_models  ──上传 YAML──→  not_ready  ──修复+提交──→  healthy
@@ -248,7 +249,7 @@ GET  /mcp/web/logout → 清除会话和 Cookie
 
 ### 5.3 存储架构 (`src/store/store.py`)
 
-每个工作区在 `system_mcp` 库中有**两张** Doris 表：
+每个工作区在 `system_mcp` 库中有两张模型表，并在共享元数据表中有一行状态：
 
 ```
 system_mcp.active_store_{workspace}     ← 已生效的模型（只读）
@@ -261,7 +262,17 @@ system_mcp.staging_store_{workspace}    ← 待提交的变更
   action     VARCHAR(16)   -- 'upsert' | 'delete'
   updated_at DATETIME
   content    STRING（delete 时为 NULL）
+
+system_mcp.workspace_metadata           ← workspace 级运行状态
+  workspace          VARCHAR(128) UNIQUE KEY
+  semantic_enabled   TINYINT
+  semantic_version   BIGINT
+  updated_at         DATETIME
+  updated_by         VARCHAR(256)
 ```
+
+`workspace_metadata` 与模型表放在同一个 `system_mcp` 管理库中，使所有 MCP
+Server 节点共享同一开关和发布版本，不依赖单机配置或本地缓存。
 
 ### 5.4 更新流程
 
@@ -282,8 +293,8 @@ system_mcp.staging_store_{workspace}    ← 待提交的变更
    │  │ Store   │  │
    │  └────┬────┘  │
    │       │       │
-   │  自动重载     │
-   │  （2-5 秒）   │
+   │  version + 1  │
+   │  并自动重载   │
    │       │       │
    ▼       ▼       ▼
   ┌─────────────┐
@@ -310,16 +321,20 @@ validate_staging(workspace)
 ```
 MultiWorkspaceWatcher
 ├─ _init_all()                ← 扫描 system_mcp 中的 active_store_* 表
-├─ _poll_loop()               ← 后台线程，60s 间隔
-│   ├─ check_remote()         ← 通过 revision hash 检测版本变化
-│   ├─ _reload_workspace()    ← fetch → bootstrap → manifest → compiler
-│   └─ 发现新增/过期工作区     ← 扫描 system_mcp 中表的变化
+├─ ensure_fresh()             ← 每次语义工具调用读取 workspace_metadata
+│   ├─ 检查 semantic_enabled  ← 关闭时拒绝语义查询
+│   ├─ 比较 semantic_version  ← 与当前 loaded_version 不同则重载
+│   └─ _reload_workspace()    ← fetch → bootstrap → manifest → compiler
 ├─ MetricRouter               ← metric_name → (compiler, workspace_name)
 ├─ force_reload()             ← 手动触发重载（API/Tool）
-└─ commit_staging()           ← staging_commit() → force_reload()
+└─ commit_staging()           ← staging_commit() → version + 1 → force_reload()
 ```
 
 **原子替换：** `RWLock.write_acquire()` 保护 manifest/compiler 的替换。任何请求都不会看到部分状态。
+
+**发布版本：** `semantic_version` 只在 active 模型实际提交后递增。每次语义
+访问都会读取这一轻量元数据行；只有版本不一致才重新 fetch 和 bootstrap。
+重载失败时不会推进 `loaded_version`，因此旧模型也不会被误报为最新版本。
 
 ---
 
