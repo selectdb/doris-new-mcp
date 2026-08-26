@@ -1,9 +1,9 @@
 """Unit tests for MultiWorkspaceWatcher — on-demand ensure_fresh logic.
 
 Covers:
-  - Cooldown: within 60s → skip check
-  - Cooldown expired, revision unchanged → touch epoch
-  - Cooldown expired, revision changed → reload
+  - Every semantic access checks the published version
+  - Revision unchanged → touch epoch
+  - Revision changed → reload
   - First load (no prior version) → reload
   - Concurrent request (parsing=True) → skip, use old data
   - Unknown workspace → return None
@@ -53,19 +53,29 @@ class FakeCompiler:
 
 class FakeStore:
     """Fake DorisStore for testing."""
-    def __init__(self, workspace="test", revision="abc123"):
+    def __init__(self, workspace="test", revision="abc123", enabled=True, semantic_version=1):
         self.workspace = workspace
         self._revision = revision
+        self._enabled = enabled
+        self._semantic_version = semantic_version
         self.files_fetched = False
 
     def check_remote(self):
-        from store.version import SemanticLayerVersion
-        return SemanticLayerVersion(
-            loaded_at="",
-            loaded_epoch=0.0,
+        from store.store import StoreState
+        return StoreState(
             revision=self._revision,
-            source_type="doris",
-            source_uri=f"system_mcp.active_store_{self.workspace}",
+            semantic_enabled=self._enabled,
+            semantic_version=self._semantic_version,
+        )
+
+    def set_semantic_enabled(self, enabled, updated_by):
+        from store.store import WorkspaceMetadata
+        self._enabled = enabled
+        return WorkspaceMetadata(
+            workspace=self.workspace,
+            semantic_enabled=enabled,
+            semantic_version=self._semantic_version,
+            updated_by=updated_by,
         )
 
     def list_files(self):
@@ -202,8 +212,107 @@ semantic_model:
             grant.assert_called_once_with({"sales.orders", "sales.users"})
 
 
-class TestEnsureFreshCooldown(unittest.TestCase):
-    """Tests for the 1-minute cooldown behaviour."""
+class TestWorkspaceSemanticEnabled(unittest.TestCase):
+    def _watcher(self):
+        from store.watcher import MultiWorkspaceWatcher
+        watcher = MultiWorkspaceWatcher.__new__(MultiWorkspaceWatcher)
+        watcher._workspaces = {}
+        watcher._router = MagicMock()
+        watcher._staging_validated = set()
+        return watcher
+
+    def test_disabled_workspace_is_not_ready_or_reloaded(self):
+        from store.version import SemanticLayerVersion
+
+        version = SemanticLayerVersion(
+            loaded_at="2026-08-26T10:00:00Z",
+            revision="1",
+            source_type="doris",
+            source_uri="db",
+            semantic_version=1,
+            metric_count=1,
+        )
+        ws = _make_workspace_state(
+            manifest=FakeManifest(),
+            compiler=FakeCompiler(),
+            known_revision="1",
+            version=version,
+        )
+        ws.store._revision = "1"
+        ws.store._semantic_version = 1
+        ws.store._enabled = False
+        watcher = self._watcher()
+        watcher._workspaces["test"] = ws
+        watcher._reload_workspace = MagicMock()
+
+        result = watcher.ensure_fresh("test")
+
+        self.assertIs(result, ws)
+        self.assertFalse(ws.enabled)
+        self.assertFalse(ws.is_ready())
+        watcher._reload_workspace.assert_not_called()
+        watcher._router.rebuild.assert_called_once()
+
+    def test_admin_toggle_is_persisted_and_router_is_rebuilt(self):
+        ws = _make_workspace_state(manifest=FakeManifest(), compiler=FakeCompiler())
+        watcher = self._watcher()
+        watcher._workspaces["test"] = ws
+
+        ok, message, details = watcher.set_semantic_enabled(
+            "test", False, "role_admin_user"
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("disabled", message)
+        self.assertFalse(ws.enabled)
+        self.assertFalse(details["semantic_enabled"])
+        watcher._router.rebuild.assert_called_once()
+
+    def test_enable_setting_stays_applied_when_reload_fails(self):
+        ws = _make_workspace_state()
+        ws.enabled = False
+        ws.store._enabled = False
+        watcher = self._watcher()
+        watcher._workspaces["test"] = ws
+
+        def fail_reload(state):
+            state.last_reload_error = "invalid semantic model"
+
+        watcher._reload_workspace = fail_reload
+
+        ok, message, details = watcher.set_semantic_enabled(
+            "test", True, "role_admin_user"
+        )
+
+        self.assertTrue(ok, "The persisted setting update itself succeeded")
+        self.assertTrue(ws.enabled)
+        self.assertTrue(details["semantic_enabled"])
+        self.assertEqual(details["reload_error"], "invalid semantic model")
+        self.assertIn("could not be loaded", message)
+
+    def test_commit_while_disabled_bumps_version_without_reload(self):
+        store = MagicMock()
+        store.staging_commit.return_value = SimpleNamespace(
+            revision="8", semantic_version=8
+        )
+        store.staging_list.return_value = []
+        ws = SimpleNamespace(store=store, models_dir=Path("/tmp"), enabled=False)
+        watcher = self._watcher()
+        watcher._workspaces["test"] = ws
+        watcher._staging_validated = {"test"}
+        watcher.force_reload = MagicMock()
+        watcher.grant_workspace_access = MagicMock(return_value=0)
+
+        ok, message = watcher.commit_staging("test")
+
+        self.assertTrue(ok)
+        self.assertEqual(ws.published_version, 8)
+        self.assertIn("reload deferred", message)
+        watcher.force_reload.assert_not_called()
+
+
+class TestEnsureFreshVersionCheck(unittest.TestCase):
+    """Tests for strict per-access semantic version checks."""
 
     def setUp(self):
         from store.watcher import MultiWorkspaceWatcher
@@ -216,10 +325,10 @@ class TestEnsureFreshCooldown(unittest.TestCase):
         self.watcher._router = MagicMock()
         self.watcher._staging_validated = set()
 
-    # ── Test 1: within cooldown → skip ──
+    # ── Test 1: even a recent load checks metadata ──
 
-    def test_within_cooldown_skips_check(self):
-        """When last load was < 60s ago, skip revision check entirely."""
+    def test_recent_load_still_checks_version(self):
+        """Every semantic access checks the shared published version."""
         from store.version import SemanticLayerVersion
 
         recent = SemanticLayerVersion(
@@ -250,13 +359,12 @@ class TestEnsureFreshCooldown(unittest.TestCase):
         result = self.watcher.ensure_fresh("test")
 
         self.assertIsNotNone(result)
-        self.assertEqual(call_count[0], 0,
-                         "Should NOT call store.check_remote() within cooldown")
+        self.assertEqual(call_count[0], 1)
 
-    # ── Test 2: cooldown expired, revision unchanged → touch ──
+    # ── Test 2: revision unchanged → touch ──
 
-    def test_cooldown_expired_revision_unchanged_touches_epoch(self):
-        """When >= 60s has passed but revision is same, bump epoch without reload."""
+    def test_revision_unchanged_touches_epoch(self):
+        """When revision is unchanged, bump the verification epoch without reload."""
         from store.version import SemanticLayerVersion
 
         old_epoch = time.time() - 90  # 90 seconds ago
@@ -289,10 +397,10 @@ class TestEnsureFreshCooldown(unittest.TestCase):
         # manifest unchanged
         self.assertEqual(ws.known_revision, "abc123")
 
-    # ── Test 3: cooldown expired, revision changed → reload ──
+    # ── Test 3: revision changed → reload ──
 
-    def test_cooldown_expired_revision_changed_triggers_reload(self):
-        """When >= 60s passed and revision differs, reload the workspace."""
+    def test_revision_changed_triggers_reload(self):
+        """When the published revision differs, reload the workspace."""
         from store.version import SemanticLayerVersion
 
         old_version = SemanticLayerVersion(
@@ -645,8 +753,8 @@ class TestEnsureFreshMultipleCalls(unittest.TestCase):
         self.watcher._router = MagicMock()
         self.watcher._staging_validated = set()
 
-    def test_multiple_calls_within_cooldown_only_check_once(self):
-        """First call checks revision, subsequent calls within cooldown skip."""
+    def test_multiple_calls_each_check_version(self):
+        """Each semantic access checks the lightweight metadata row."""
         from store.version import SemanticLayerVersion
 
         recent = SemanticLayerVersion(
@@ -675,11 +783,10 @@ class TestEnsureFreshMultipleCalls(unittest.TestCase):
             result = self.watcher.ensure_fresh("test")
             self.assertIsNotNone(result)
 
-        self.assertEqual(check_count[0], 0,
-                         "All calls within cooldown, should never hit store")
+        self.assertEqual(check_count[0], 10)
 
-    def test_cooldown_expired_then_next_call_within_cooldown(self):
-        """After cooldown expires and revision checked, next call uses cooldown."""
+    def test_consecutive_calls_both_check_version(self):
+        """A second immediate access still checks the published version."""
         from store.version import SemanticLayerVersion
 
         old_version = SemanticLayerVersion(
@@ -700,21 +807,20 @@ class TestEnsureFreshMultipleCalls(unittest.TestCase):
         ws.store._revision = "abc123"  # unchanged
         self.watcher._workspaces["test"] = ws
 
-        # First call: cooldown expired, checks revision
+        # First call checks revision.
         result1 = self.watcher.ensure_fresh("test")
         self.assertIsNotNone(result1)
 
         epoch_after_first = ws.version_tracker.current.loaded_epoch
 
-        # Second call immediately: should be within cooldown
+        # Second call immediately still checks metadata.
         check_count = [0]
         ws.store.check_remote = lambda: (check_count.__setitem__(0, check_count[0] + 1)
                                           or MagicMock(revision="abc123"))
 
         result2 = self.watcher.ensure_fresh("test")
         self.assertIsNotNone(result2)
-        self.assertEqual(check_count[0], 0,
-                         "Second call within cooldown should not check store")
+        self.assertEqual(check_count[0], 1)
 
 
 # ══════════════════════════════════════════════════════════════════
