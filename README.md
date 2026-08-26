@@ -116,7 +116,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 5. Manage semantic models
 
-**Semantic Web UI** (`/mcp/web`): authenticated users can inspect models; users with the Doris `admin` role can create/upload/edit YAML models → **Validate** → **Commit**. Only validated models go live.
+**Semantic Web UI** (`/mcp/web`): authenticated users can inspect models; users with the Doris `admin` role can create/upload/edit YAML models → **Validate** → **Commit** and toggle **Semantic queries: ON/OFF** for each workspace. Only validated models go live. Disabling semantic queries preserves models and staging changes, blocks semantic MCP tools, and leaves read-only SQL available.
 
 **CLI client:**
 

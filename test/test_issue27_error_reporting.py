@@ -33,7 +33,7 @@ class TestForceReloadErrorSurfacing(unittest.TestCase):
         watcher._workspaces = {}
         return watcher
 
-    def _version(self, revision="abc123", success=True):
+    def _version(self, revision="abc123", success=True, semantic_version=1):
         from store.version import SemanticLayerVersion
         return SemanticLayerVersion(
             loaded_at="2026-08-19T10:00:00Z",
@@ -41,6 +41,7 @@ class TestForceReloadErrorSurfacing(unittest.TestCase):
             revision=revision,
             source_type="doris",
             source_uri="db",
+            semantic_version=semantic_version,
             metric_count=5,
             last_reload_success=success,
         )
@@ -80,7 +81,10 @@ class TestForceReloadErrorSurfacing(unittest.TestCase):
 
     def test_success_still_returns_done(self):
         """A genuinely successful reload is unaffected."""
-        ws = _make_workspace_state(name="test", version=self._version(revision="abcdef123456"))
+        ws = _make_workspace_state(
+            name="test",
+            version=self._version(revision="abcdef123456", semantic_version=7),
+        )
         watcher = self._watcher()
         watcher._workspaces["test"] = ws
 
@@ -91,7 +95,7 @@ class TestForceReloadErrorSurfacing(unittest.TestCase):
 
         status, msg = watcher.force_reload("test")
         self.assertEqual(status, "done")
-        self.assertIn("abcdef123456", msg)
+        self.assertIn("semantic version: 7", msg)
 
     def test_missing_workspace_is_rejected(self):
         """Workspace-not-found maps to 'rejected', a validation error."""

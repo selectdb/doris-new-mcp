@@ -24,6 +24,20 @@ from store.version import SemanticLayerVersion, VersionTracker
 logger = logging.getLogger("doris_new_mcp.watcher")
 
 
+def _state_enabled(state: Any) -> bool:
+    """Read the persisted toggle, defaulting old/test stores to enabled."""
+    return bool(getattr(state, "semantic_enabled", True))
+
+
+def _state_version(state: Any) -> int:
+    """Read the published integer version from a store state."""
+    value = getattr(state, "semantic_version", 0)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _check_staging_duplicates(models_dir: Path) -> tuple[list[str], list[str]]:
     """Check staging YAML files for duplicate names across semantic_models.
 
@@ -146,6 +160,7 @@ class WorkspaceState:
     
     # Polling
     known_revision: str = ""
+    published_version: int = 0
     parsing: bool = False
 
     # Last reload outcome — surfaced to callers instead of a generic message
@@ -154,13 +169,29 @@ class WorkspaceState:
     # Version tracking
     version_tracker: VersionTracker = field(default_factory=VersionTracker)
     rwlock: RWLock = field(default_factory=RWLock)
+    reload_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def is_ready(self) -> bool:
         """True when the semantic layer is loaded AND the MetricFlow engine is
         initialized. Single source of truth for every tool that needs the
         layer — health, list_metrics, list_dimensions, query_metric — so they
         can never disagree about whether the workspace is initialized."""
-        return bool(self.manifest and self.compiler and self.compiler.is_engine_mode)
+        version = self.version_tracker.current
+        version_ready = version is None or (
+            version.last_reload_success
+            and (
+                self.published_version == 0
+                or version.semantic_version == self.published_version
+            )
+        )
+        return bool(
+            self.enabled
+            and not self.parsing
+            and version_ready
+            and self.manifest
+            and self.compiler
+            and self.compiler.is_engine_mode
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +207,7 @@ class MetricRouter:
     def rebuild(self, workspaces: dict[str, WorkspaceState]) -> None:
         self._map.clear()
         for ws_name, ws in workspaces.items():
-            if not ws.manifest or not ws.enabled:
+            if not ws.is_ready():
                 continue
             for m in ws.manifest.list_metrics():
                 name = m["name"]
@@ -271,24 +302,27 @@ class MultiWorkspaceWatcher:
         models_dir = ws_dir / "models_cache"
         ws_dir.mkdir(parents=True, exist_ok=True)
 
+        try:
+            remote = store.check_remote()
+        except Exception:
+            logger.exception("[%s] Failed to read workspace metadata", ws_name)
+            remote = None
+
         ws = WorkspaceState(
             name=ws_name,
             store=store,
             config_dir=self._config_dir,
             workspace_dir=ws_dir,
             models_dir=models_dir,
-            enabled=True,
+            enabled=_state_enabled(remote) if remote is not None else True,
+            known_revision=remote.revision if remote is not None else "",
+            published_version=_state_version(remote) if remote is not None else 0,
         )
 
         self._workspaces[ws_name] = ws
 
-        if first_load:
+        if first_load and ws.enabled:
             self._reload_workspace(ws)
-        else:
-            try:
-                ws.known_revision = store.check_remote().revision
-            except Exception:
-                ws.known_revision = ""
 
         self._router.rebuild(self._workspaces)
         logger.info(f"Workspace '{ws_name}' initialized (first_load={first_load})")
@@ -298,15 +332,14 @@ class MultiWorkspaceWatcher:
     # On-demand freshness (called within request context)
     # ------------------------------------------------------------------
 
-    _FRESHNESS_TTL = 60.0  # seconds between reload checks
     _MISSING_WS_TTL = 30.0  # seconds to remember a "workspace not found" verdict
 
     def ensure_fresh(self, workspace_name: str) -> WorkspaceState | None:
         """Ensure the workspace manifest/compiler is up-to-date.
 
         Called from tool handlers within request context.  If the
-        workspace hasn't been loaded yet, discovers it.  Cooldown
-        prevents redundant reloads within _FRESHNESS_TTL seconds.
+        workspace hasn't been loaded yet, discovers it. Every semantic access
+        compares the published workspace version with the loaded version.
         A "workspace not found" verdict is negative-cached for
         _MISSING_WS_TTL seconds so repeated calls with a bad workspace
         name don't each cost a Doris round-trip.
@@ -348,27 +381,39 @@ class MultiWorkspaceWatcher:
         if ws is None:
             return None
 
+        # Another request is already rebuilding this workspace. Do not start a
+        # second build and do not report the old manifest as ready.
         if ws.parsing:
             return ws
 
-        # Cooldown — skip reload if fresh enough
-        current = ws.version_tracker.current
-        if current is not None and time.time() - current.loaded_epoch < self._FRESHNESS_TTL:
-            return ws
-
-        # Check if revision changed.  A failure here means we cannot tell
+        # Check the shared workspace metadata. A failure here means we cannot tell
         # whether the loaded manifest is current; serving it anyway would
         # hand back silently-outdated metric definitions, so refuse instead.
         try:
-            new_rev = ws.store.check_remote().revision
+            remote = ws.store.check_remote()
         except Exception:
             logger.exception(
-                f"ensure_fresh [{workspace_name}]: revision check failed, "
+                f"ensure_fresh [{workspace_name}]: metadata check failed, "
                 f"refusing to serve a possibly stale manifest"
             )
             return None
 
-        if current is not None and new_rev == ws.known_revision:
+        enabled_changed = ws.enabled != _state_enabled(remote)
+        ws.enabled = _state_enabled(remote)
+        ws.published_version = _state_version(remote)
+        if enabled_changed:
+            self._router.rebuild(self._workspaces)
+
+        if not ws.enabled:
+            return ws
+
+        current = ws.version_tracker.current
+        if (
+            current is not None
+            and current.last_reload_success
+            and current.revision == remote.revision
+        ):
+            ws.known_revision = remote.revision
             ws.version_tracker.touch_epoch()
             return ws
 
@@ -380,79 +425,117 @@ class MultiWorkspaceWatcher:
     # ------------------------------------------------------------------
 
     def _reload_workspace(self, ws: WorkspaceState) -> None:
-        if ws.parsing:
-            logger.info(f"[{ws.name}] Reload skipped: already in progress")
-            return
+        # Only one request may build/swap a workspace at a time. A second
+        # request waits, then observes the version loaded by the first one.
+        with ws.reload_lock:
+            ws.parsing = True
+            t0 = time.monotonic()
+            logger.info(f"[{ws.name}] Reloading...")
 
-        ws.parsing = True
-        t0 = time.monotonic()
-        logger.info(f"[{ws.name}] Reloading...")
-
-        try:
-            from store.bootstrap import bootstrap
-            from store.manifest import SemanticManifest
-            from store.compiler import MetricFlowCompiler
-
-            # Sync from Doris to local cache
-            ws.store.fetch(ws.models_dir)
-
-            # Bootstrap
-            ok, err = bootstrap(self._config_dir, ws.workspace_dir, models_dir=ws.models_dir)
-            if not ok:
-                logger.error(f"[{ws.name}] Bootstrap failed: {err}. Keeping old version.")
-                ws.last_reload_error = str(err)
-                ws.version_tracker.mark_failure()
-                ws.known_revision = ws.store.check_remote().revision
-                return
-
-            # Build new manifest + compiler
-            manifest_path = ws.workspace_dir / "target" / "semantic_manifest.json"
-            new_manifest = SemanticManifest(manifest_path)
-            new_compiler = MetricFlowCompiler(ws.workspace_dir)
-            metric_count = len(new_manifest.list_metrics())
-
-            # Atomic swap
-            ws.rwlock.write_acquire()
             try:
-                if ws.manifest and ws.compiler:
-                    ws.manifest.replace_with(new_manifest)
-                    ws.compiler.replace_with(new_compiler)
-                else:
-                    ws.manifest = new_manifest
-                    ws.compiler = new_compiler
+                from store.bootstrap import bootstrap
+                from store.manifest import SemanticManifest
+                from store.compiler import MetricFlowCompiler
+
+                remote = ws.store.check_remote()
+                ws.enabled = _state_enabled(remote)
+                ws.published_version = _state_version(remote)
+                if not ws.enabled:
+                    self._router.rebuild(self._workspaces)
+                    return
+
+                current = ws.version_tracker.current
+                if (
+                    ws.known_revision
+                    and current is not None
+                    and current.last_reload_success
+                    and current.revision == remote.revision
+                    and ws.manifest
+                    and ws.compiler
+                ):
+                    return
+
+                # If a publish happens while files are being compiled, discard
+                # that build and retry against the new stable version.
+                for attempt in range(1, 4):
+                    target = remote
+                    ws.store.fetch(ws.models_dir)
+
+                    ok, err = bootstrap(
+                        self._config_dir,
+                        ws.workspace_dir,
+                        models_dir=ws.models_dir,
+                    )
+                    if not ok:
+                        raise RuntimeError(str(err))
+
+                    manifest_path = ws.workspace_dir / "target" / "semantic_manifest.json"
+                    new_manifest = SemanticManifest(manifest_path)
+                    new_compiler = MetricFlowCompiler(ws.workspace_dir)
+                    metric_count = len(new_manifest.list_metrics())
+
+                    verified = ws.store.check_remote()
+                    ws.enabled = _state_enabled(verified)
+                    ws.published_version = _state_version(verified)
+                    if not ws.enabled:
+                        self._router.rebuild(self._workspaces)
+                        return
+                    if verified.revision != target.revision:
+                        logger.info(
+                            "[%s] Published version changed during reload (%s -> %s), retry %s/3",
+                            ws.name,
+                            _state_version(target),
+                            _state_version(verified),
+                            attempt,
+                        )
+                        remote = verified
+                        continue
+
+                    ws.rwlock.write_acquire()
+                    try:
+                        if ws.manifest and ws.compiler:
+                            ws.manifest.replace_with(new_manifest)
+                            ws.compiler.replace_with(new_compiler)
+                        else:
+                            ws.manifest = new_manifest
+                            ws.compiler = new_compiler
+                    finally:
+                        ws.rwlock.write_release()
+
+                    ws.known_revision = verified.revision
+                    version = SemanticLayerVersion(
+                        loaded_at=SemanticLayerVersion.now_iso(),
+                        loaded_epoch=time.time(),
+                        revision=verified.revision,
+                        source_type=ws.store.store_type,
+                        source_uri=ws.store.source_uri,
+                        semantic_version=_state_version(verified),
+                        metric_count=metric_count,
+                        last_reload_success=True,
+                    )
+                    ws.version_tracker.update(version)
+                    ws.last_reload_error = ""
+                    self._router.rebuild(self._workspaces)
+
+                    duration = (time.monotonic() - t0) * 1000
+                    logger.info(
+                        "[%s] Reload done: version=%s, %s metrics in %.0fms",
+                        ws.name,
+                        _state_version(verified),
+                        metric_count,
+                        duration,
+                    )
+                    return
+
+                raise RuntimeError("Semantic version changed repeatedly during reload")
+
+            except Exception as e:
+                logger.exception(f"[{ws.name}] Reload failed: {e}")
+                ws.last_reload_error = str(e)
+                ws.version_tracker.mark_failure()
+                self._router.rebuild(self._workspaces)
             finally:
-                ws.rwlock.write_release()
-
-            ws.known_revision = ws.store.check_remote().revision
-            duration = (time.monotonic() - t0) * 1000
-            now_epoch = time.time()
-
-            # Update version tracker (with epoch for cooldown)
-            version = SemanticLayerVersion(
-                loaded_at=SemanticLayerVersion.now_iso(),
-                loaded_epoch=now_epoch,
-                revision=ws.known_revision,
-                source_type=ws.store.store_type,
-                source_uri=ws.store.source_uri,
-                metric_count=metric_count,
-                last_reload_success=True,
-            )
-            ws.version_tracker.update(version)
-            ws.last_reload_error = ""
-
-            # Rebuild global router
-            self._router.rebuild(self._workspaces)
-
-            logger.info(
-                f"[{ws.name}] Reload done: {metric_count} metrics in {duration:.0f}ms"
-            )
-
-        except Exception as e:
-            logger.exception(f"[{ws.name}] Reload failed: {e}")
-            ws.last_reload_error = str(e)
-            ws.version_tracker.mark_failure()
-        finally:
-            ws.parsing = False
+                ws.parsing = False
 
     # ------------------------------------------------------------------
     # Manual reload
@@ -462,19 +545,72 @@ class MultiWorkspaceWatcher:
         ws = self._workspaces.get(workspace)
         if not ws:
             return "rejected", f"Workspace not found: {workspace}"
+        try:
+            remote = ws.store.check_remote()
+            ws.enabled = _state_enabled(remote)
+            ws.published_version = _state_version(remote)
+        except Exception as exc:
+            return "failed", f"Workspace metadata check failed: {exc}"
+        if not ws.enabled:
+            return "disabled", f"Semantic queries are disabled for workspace '{workspace}'"
         if ws.parsing:
             return "already_running", "Reload already in progress"
 
         ws.known_revision = ""
         self._reload_workspace(ws)
         # _reload_workspace handles its own exceptions internally;
-        # check the version tracker to determine success. revision == "-1"
-        # is a failure sentinel Doris can report for an empty/tablet-less store
-        # — never present it inside a success envelope.
+        # check the version tracker to determine success.
         ver = ws.version_tracker.current
         if ver is None or not ver.last_reload_success or ver.revision == "-1":
             return "failed", ws.last_reload_error or "Reload failed — check server logs for details"
-        return "done", f"Reload completed ({ver.revision[:12]})"
+        return "done", f"Reload completed (semantic version: {ver.semantic_version})"
+
+    def set_semantic_enabled(
+        self,
+        workspace: str,
+        enabled: bool,
+        updated_by: str,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        ws = self._workspaces.get(workspace)
+        if not ws:
+            return False, f"Workspace not found: {workspace}", None
+
+        try:
+            metadata = ws.store.set_semantic_enabled(enabled, updated_by)
+        except Exception as exc:
+            return False, f"Failed to update workspace metadata: {exc}", None
+
+        ws.enabled = metadata.semantic_enabled
+        ws.published_version = metadata.semantic_version
+        reload_error: str | None = None
+        if not enabled:
+            self._router.rebuild(self._workspaces)
+            message = f"Semantic queries disabled for workspace '{workspace}'"
+        else:
+            # Enabling is an explicit Semantic Web UI action, so load the
+            # latest published version immediately instead of waiting for the
+            # next metric tool call.
+            ws.known_revision = ""
+            self._reload_workspace(ws)
+            if not ws.is_ready():
+                reload_error = ws.last_reload_error or "Semantic layer reload failed"
+                message = (
+                    f"Semantic queries enabled for workspace '{workspace}', "
+                    f"but the latest version could not be loaded: {reload_error}"
+                )
+            else:
+                message = f"Semantic queries enabled for workspace '{workspace}'"
+
+        loaded = ws.version_tracker.current
+        details = {
+            "workspace": workspace,
+            "semantic_enabled": ws.enabled,
+            "semantic_version": ws.published_version,
+            "loaded_version": loaded.semantic_version if loaded else None,
+        }
+        if enabled and reload_error:
+            details["reload_error"] = reload_error
+        return True, message, details
 
     # ------------------------------------------------------------------
     # Staging
@@ -599,9 +735,18 @@ class MultiWorkspaceWatcher:
         # Clear validation tracking after successful commit
         self._staging_validated.discard(workspace)
 
-        status, reload_message = self.force_reload(workspace)
-        if status != "done":
-            return False, f"Committed, but reload failed: {reload_message}"
+        state_version = _state_version(state)
+        if getattr(ws, "enabled", True):
+            status, reload_message = self.force_reload(workspace)
+            if status != "done":
+                return False, f"Committed, but reload failed: {reload_message}"
+            reload_note = "reload triggered"
+        else:
+            # Disabled workspaces still accept model management changes. The
+            # latest published version is loaded when semantic queries are
+            # enabled again.
+            ws.published_version = state_version
+            reload_note = "reload deferred while semantic queries are disabled"
 
         try:
             self.grant_workspace_access(workspace)
@@ -612,9 +757,9 @@ class MultiWorkspaceWatcher:
         remaining = ws.store.staging_list()
         if remaining:
             logger.warning(f"[{workspace}] {len(remaining)} staging items remain after commit")
-            return True, f"Committed (revision: {state.revision[:12]}), reload triggered. {len(remaining)} items remain — retry after reload."
+            return True, f"Committed (semantic version: {state_version}), {reload_note}. {len(remaining)} items remain — retry after reload."
 
-        return True, f"Committed and reload triggered (revision: {state.revision[:12]})"
+        return True, f"Committed (semantic version: {state_version}); {reload_note}"
 
     def grant_workspace_access(self, workspace: str) -> int:
         """Grant all users access to every physical table in one workspace."""

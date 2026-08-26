@@ -1,8 +1,8 @@
 """Semantic layer version tracking.
 
 Maintains a snapshot of the currently loaded semantic layer state.
-Only ``loaded_at`` is exposed externally (health/tool responses).
-All other fields are for internal logging and decision-making.
+``loaded_at`` and ``semantic_version`` are exposed by health responses;
+the remaining fields are for internal logging and decision-making.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ class SemanticLayerVersion:
     """Immutable snapshot of a loaded semantic layer version."""
 
     loaded_at: str
-    """ISO8601 timestamp of when this version was loaded — the sole external identifier."""
+    """ISO8601 timestamp of when this version was loaded."""
 
     revision: str
     """Store-returned opaque revision (for equality comparison)."""
@@ -33,6 +33,9 @@ class SemanticLayerVersion:
 
     version_label: str | None = None
     """Store-provided human-readable label (e.g. .version content, git tag)."""
+
+    semantic_version: int = 0
+    """Published workspace version loaded into the manifest/compiler."""
 
     metric_count: int = 0
     """Number of metrics in this version."""
@@ -83,6 +86,7 @@ class VersionTracker:
                     source_type=self._version.source_type,
                     source_uri=self._version.source_uri,
                     version_label=self._version.version_label,
+                    semantic_version=self._version.semantic_version,
                     metric_count=self._version.metric_count,
                     last_reload_success=False,
                 )

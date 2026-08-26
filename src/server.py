@@ -679,7 +679,7 @@ def create_server(
                 is_admin = _session_has_admin_access(session)
                 if require_admin and not is_admin:
                     return None, False, JSONResponse(
-                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models."}},
+                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models or settings."}},
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(client_id, session.get("doris_password", ""))
@@ -700,7 +700,7 @@ def create_server(
             if ok:
                 if require_admin and not is_admin:
                     return None, False, JSONResponse(
-                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models."}},
+                        {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models or settings."}},
                         status_code=403)
                 from store.store import set_request_credentials
                 set_request_credentials(username, password)
@@ -985,13 +985,32 @@ def create_server(
             ws = multi_watcher.get_workspace(ws_name)
             if not ws:
                 continue
+            loaded = ws.version_tracker.current
+            version_data = {
+                "semantic_enabled": ws.enabled,
+                "semantic_version": ws.published_version,
+                "loaded_version": loaded.semantic_version if loaded else None,
+                "loaded_at": loaded.loaded_at if loaded else None,
+            }
             # ws.is_ready() is the same single source of truth the metric tools
             # gate on, so health can never disagree with list_metrics/query_metric.
-            if ws.is_ready():
+            if not ws.enabled:
+                ws_statuses[ws_name] = {
+                    "status": "disabled",
+                    **version_data,
+                }
+            elif ws.is_ready():
                 metrics = ws.manifest.list_metrics()
                 ws_statuses[ws_name] = {
                     "status": "healthy",
                     "metric_count": len(metrics),
+                    **version_data,
+                }
+            elif loaded is not None and not loaded.last_reload_success:
+                ws_statuses[ws_name] = {
+                    "status": "reload_failed",
+                    "message": ws.last_reload_error or "Semantic layer reload failed",
+                    **version_data,
                 }
             elif ws.manifest and ws.compiler:
                 # Manifest loaded but the MetricFlow engine failed to initialize —
@@ -1000,6 +1019,7 @@ def create_server(
                 ws_statuses[ws_name] = {
                     "status": "not_ready",
                     "message": f"Engine init failed: {err}",
+                    **version_data,
                 }
             else:
                 files = await asyncio.to_thread(ws.store.list_files)
@@ -1007,11 +1027,13 @@ def create_server(
                     ws_statuses[ws_name] = {
                         "status": "no_models",
                         "message": "No YAML files uploaded",
+                        **version_data,
                     }
                 else:
                     ws_statuses[ws_name] = {
                         "status": "not_ready",
                         "message": ws.last_reload_error or "Files present but failed to load",
+                        **version_data,
                     }
 
         health_data = {
@@ -1030,6 +1052,25 @@ def create_server(
 
     # ========== Metric Layer Tools (loaded on demand) ==========
 
+    def _semantic_workspace_error(ws, workspace: str) -> str | None:
+        if ws is None:
+            return error_response(
+                ErrorCode.SERVICE_NOT_READY,
+                f"Semantic workspace '{workspace}' was not found or could not be checked",
+            )
+        if not ws.enabled:
+            return error_response(
+                ErrorCode.SEMANTIC_DISABLED,
+                f"Semantic queries are disabled for workspace '{workspace}'",
+            )
+        if not ws.is_ready():
+            return error_response(
+                ErrorCode.SERVICE_NOT_READY,
+                ws.last_reload_error
+                or f"Semantic layer not initialized for workspace '{workspace}'",
+            )
+        return None
+
     @mcp.tool(
         description=_metric_description,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -1041,8 +1082,8 @@ def create_server(
             return auth.denied
         start = time.monotonic()
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
-        if not ws or not ws.is_ready():
-            return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
+        if semantic_error := _semantic_workspace_error(ws, workspace):
+            return semantic_error
         from tools.semantic import list_metrics as _list_metrics
         result = await _list_metrics(ws.manifest, page_size, page_token or None)
         log_tool_call("list_metrics", client_id=auth.client_id,
@@ -1060,8 +1101,8 @@ def create_server(
             return auth.denied
         start = time.monotonic()
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
-        if not ws or not ws.is_ready():
-            return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
+        if semantic_error := _semantic_workspace_error(ws, workspace):
+            return semantic_error
         from tools.semantic import list_dimensions_for_metric as _list_dims
         result = await _list_dims(ws.manifest, metric_name)
         log_tool_call("list_dimensions_for_metric", client_id=auth.client_id, params={"metric_name": metric_name},
@@ -1089,8 +1130,8 @@ def create_server(
             return auth.denied
         start = time.monotonic()
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
-        if not ws or not ws.is_ready():
-            return error_response(ErrorCode.SERVICE_NOT_READY, f"Semantic layer not initialized for workspace '{workspace}'")
+        if semantic_error := _semantic_workspace_error(ws, workspace):
+            return semantic_error
         if group_by:
             group_by = ws.compiler.resolve_group_by(metrics, group_by)
         if order_by:
@@ -1126,6 +1167,11 @@ def create_server(
         ws = await asyncio.to_thread(multi_watcher.ensure_fresh, workspace)
         if not ws:
             return error_response(ErrorCode.VALIDATION_ERROR, f"Workspace not found: {workspace}")
+        if not ws.enabled:
+            return error_response(
+                ErrorCode.SEMANTIC_DISABLED,
+                f"Semantic queries are disabled for workspace '{workspace}'",
+            )
         status, msg = await asyncio.to_thread(multi_watcher.force_reload, workspace)
         log_tool_call("reload_semantic_layer", client_id=auth.client_id,
                       success=(status == "done"), duration_ms=0, metricflow=True)
@@ -1138,6 +1184,8 @@ def create_server(
             return success_response({"status": status, "message": msg})
         if status == "rejected":
             return error_response(ErrorCode.VALIDATION_ERROR, msg)
+        if status == "disabled":
+            return error_response(ErrorCode.SEMANTIC_DISABLED, msg)
         # status == "failed" — surface the underlying error, not a generic wrapper
         return error_response(_reload_error_code(msg), msg)
 
@@ -1164,6 +1212,8 @@ def create_server(
             return _JSONResponse({"success": True, "data": {"status": status, "message": msg}})
         if status == "rejected":
             return _JSONResponse({"success": False, "error": {"code": "VALIDATION_ERROR", "message": msg}}, status_code=400)
+        if status == "disabled":
+            return _JSONResponse({"success": False, "error": {"code": ErrorCode.SEMANTIC_DISABLED.value, "message": msg}}, status_code=409)
         # failed — surface the underlying error and a 5xx so CI/CD sees a failure
         return _JSONResponse({"success": False, "error": {"code": _reload_error_code(msg).value, "message": msg}}, status_code=500)
 
@@ -1523,6 +1573,7 @@ def create_server(
             return err
         ws = _get_workspace_from_request(request)
         st = await asyncio.to_thread(_get_store, ws)
+        ws_obj = await asyncio.to_thread(multi_watcher.ensure_fresh, ws)
 
         flash = ""
         staged_q = request.query_params.get("staged")
@@ -1593,16 +1644,21 @@ def create_server(
         staging_body += '<div id="ws-result" class="result" style="display:none;margin-top:16px;"></div>'
         
         # Workspace status indicator
-        ws_obj = multi_watcher.get_workspace(ws)
-        if ws_obj and ws_obj.manifest:
+        version_suffix = (
+            f" · v{ws_obj.published_version}" if ws_obj and ws_obj.published_version else ""
+        )
+        if ws_obj and not ws_obj.enabled:
+            status_text = f"disabled{version_suffix}"
+            status_color = "color:var(--muted);"
+        elif ws_obj and ws_obj.is_ready():
             metrics = ws_obj.manifest.list_metrics()
-            status_text = f"healthy · {len(metrics)} metrics"
+            status_text = f"healthy · {len(metrics)} metrics{version_suffix}"
             status_color = "color:#1e8e3e;"
         elif ws_obj and await asyncio.to_thread(ws_obj.store.list_files):
-            status_text = "not ready"
+            status_text = f"not ready{version_suffix}"
             status_color = "color:#e37400;"
         else:
-            status_text = "no models"
+            status_text = f"no models{version_suffix}"
             status_color = "color:var(--muted);"
         if is_admin:
             from store.seed import is_example_deployed
@@ -1617,13 +1673,32 @@ def create_server(
                     '<button class="btn btn-sm btn-success" '
                     'onclick="exampleAction(true)">🧪 Deploy example</button>'
                 )
+            semantic_enabled = bool(ws_obj and ws_obj.enabled)
+            toggle_label = "Semantic queries: ON" if semantic_enabled else "Semantic queries: OFF"
+            toggle_class = "btn-success" if semantic_enabled else "btn-danger"
+            toggle_html = (
+                f'<button class="btn btn-sm {toggle_class}" '
+                f'onclick="toggleSemantic({str(not semantic_enabled).lower()})">'
+                f'{toggle_label}</button> '
+            )
+            reload_html = (
+                '<button class="btn btn-sm" '
+                'onclick="wsAction(\'/mcp/web/semantic/reload\',\'Reloading\')">⟳ Reload</button> '
+                if semantic_enabled
+                else ""
+            )
             ws_actions_html = (
                 '<span class="btn btn-sm" style="' + status_color + ';cursor:default;">' + status_text + '</span> '
-                '<button class="btn btn-sm" onclick="wsAction(\'/mcp/web/semantic/reload\',\'Reloading\')">⟳ Reload</button>'
+                + toggle_html
+                + reload_html
                 + example_action_html
             )
         else:
-            ws_actions_html = '<span class="btn btn-sm" style="' + status_color + ';cursor:default;">' + status_text + '</span>'
+            enabled_text = "ON" if ws_obj and ws_obj.enabled else "OFF"
+            ws_actions_html = (
+                '<span class="btn btn-sm" style="' + status_color + ';cursor:default;">' + status_text + '</span> '
+                '<span class="btn btn-sm" style="cursor:default;">Semantic queries: ' + enabled_text + '</span>'
+            )
         body = "{{ACTIVE_PANEL}}" + active_body + "{{STAGING_PANEL}}" + staging_body
         html = _render_page(body, client_id, is_admin, ws, ws_actions_html)
         return _HTML(html)
@@ -1713,6 +1788,24 @@ function fetchJson(url,opts) {
     var ct=r.headers.get("content-type")||"";
     if(ct.indexOf("json")===-1){throw new Error("Request failed (HTTP "+r.status+"), please retry.");}
     return r.json();
+  });
+}
+function toggleSemantic(enabled) {
+  var ws=new URLSearchParams(window.location.search).get("workspace")||"example";
+  var action=enabled?"enable":"disable";
+  if(!confirm("Are you sure you want to "+action+" semantic queries for workspace '"+ws+"'?")) return;
+  var el=document.getElementById("ws-result");
+  if(el){el.textContent="⏳ Updating semantic query setting...";el.style.display="block";el.style.background="";}
+  fetchJson("/mcp/web/workspace/semantic-enabled",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({workspace:ws,semantic_enabled:enabled})
+  }).then(function(d){
+    if(!d.success){throw new Error(d.error?d.error.message:"Failed");}
+    if(el){el.textContent="✅ "+d.data.message;el.style.background="#e6f4ea";}
+    setTimeout(function(){location.reload();},600);
+  }).catch(function(e){
+    if(el){el.textContent="❌ "+e.message;el.style.background="#fce8e6";}else alert(e.message);
   });
 }
 function exampleAction(deploy) {
@@ -2012,7 +2105,61 @@ function wsAction(url,label) {
                       params={"workspace": ws}, success=True, duration_ms=0)
         return _JSONResponse({"success": True, "data": {"message": "Staging discarded"}})
 
-    # ---- Semantic toggle via WebUI form ----
+    # ---- Semantic query toggle (Doris admin role required) ----
+
+    @mcp.custom_route("/mcp/web/workspace/semantic-enabled", methods=["POST"])
+    async def api_workspace_semantic_enabled(request: Request) -> Response:
+        client_id, err = await _check_admin_access(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return _JSONResponse(
+                {"success": False, "error": {"code": "BAD_REQUEST", "message": "Invalid JSON"}},
+                status_code=400,
+            )
+
+        workspace = (body.get("workspace", "") or "").strip()
+        enabled = body.get("semantic_enabled")
+        if not workspace:
+            return _JSONResponse(
+                {"success": False, "error": {"code": "VALIDATION_ERROR", "message": "workspace is required"}},
+                status_code=400,
+            )
+        if not isinstance(enabled, bool):
+            return _JSONResponse(
+                {"success": False, "error": {"code": "VALIDATION_ERROR", "message": "semantic_enabled must be a boolean"}},
+                status_code=400,
+            )
+        if not multi_watcher.has_workspace(workspace):
+            return _JSONResponse(
+                {"success": False, "error": {"code": "NOT_FOUND", "message": f"Workspace '{workspace}' not found"}},
+                status_code=404,
+            )
+
+        ok, message, details = await asyncio.to_thread(
+            multi_watcher.set_semantic_enabled,
+            workspace,
+            enabled,
+            client_id or "",
+        )
+        log_tool_call(
+            "set_semantic_enabled",
+            client_id=client_id,
+            params={"workspace": workspace, "semantic_enabled": enabled},
+            success=ok,
+            duration_ms=0,
+        )
+        if not ok:
+            return _JSONResponse(
+                {"success": False, "error": {"code": "SERVICE_NOT_READY", "message": message}, "data": details},
+                status_code=500,
+            )
+        return _JSONResponse(
+            {"success": True, "data": {**(details or {}), "message": message}}
+        )
+
     # ---- Semantic Management API (for CLI, MUST be before {filename:path}) ----
 
     @mcp.custom_route("/mcp/web/semantic/files", methods=["GET"])

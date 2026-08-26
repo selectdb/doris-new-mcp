@@ -44,6 +44,17 @@ class StoreState:
     revision: str
     version_label: str | None = None
     updated_at: str | None = None
+    semantic_enabled: bool = True
+    semantic_version: int = 0
+
+
+@dataclass(frozen=True)
+class WorkspaceMetadata:
+    workspace: str
+    semantic_enabled: bool
+    semantic_version: int
+    updated_at: str | None = None
+    updated_by: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +64,7 @@ class StoreState:
 _DORIS_HOST = "127.0.0.1"
 _DORIS_PORT = 9030
 _DORIS_DB = "system_mcp"
+_WORKSPACE_METADATA_TABLE = "workspace_metadata"
 
 # Request-scoped credential override. Set once at the start of each
 # authenticated request, read by _get_conn(). Destroyed when the
@@ -168,6 +180,15 @@ class DorisStore:
         try:
             with conn.cursor() as cur:
                 cur.execute(f"USE {_DORIS_DB}")
+                try:
+                    cur.execute(
+                        f"DELETE FROM {_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
+                        (workspace,),
+                    )
+                except Exception:
+                    # Backward-compatible with deployments created before the
+                    # shared metadata table existed.
+                    pass
                 cur.execute(f"DROP TABLE IF EXISTS active_store_{workspace}")
                 cur.execute(f"DROP TABLE IF EXISTS staging_store_{workspace}")
             logger.info(f"Dropped semantic tables for workspace '{workspace}'")
@@ -179,23 +200,100 @@ class DorisStore:
     # ------------------------------------------------------------------
 
     def check_remote(self) -> StoreState:
+        metadata = self.get_workspace_metadata()
+        return StoreState(
+            revision=str(metadata.semantic_version),
+            updated_at=metadata.updated_at,
+            semantic_enabled=metadata.semantic_enabled,
+            semantic_version=metadata.semantic_version,
+        )
+
+    # ------------------------------------------------------------------
+    # Workspace metadata
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _metadata_from_row(workspace: str, row: tuple) -> WorkspaceMetadata:
+        updated_at = row[2]
+        if isinstance(updated_at, datetime):
+            updated_at = updated_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif updated_at is not None:
+            updated_at = str(updated_at)
+        return WorkspaceMetadata(
+            workspace=workspace,
+            semantic_enabled=bool(row[0]),
+            semantic_version=int(row[1]),
+            updated_at=updated_at,
+            updated_by=str(row[3]) if row[3] is not None else None,
+        )
+
+    def _get_workspace_metadata_with_cursor(self, cur) -> WorkspaceMetadata:
+        cur.execute(
+            f"SELECT semantic_enabled, semantic_version, updated_at, updated_by "
+            f"FROM {_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
+            (self._workspace,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            user = (_request_creds.get() or ("system", ""))[0]
+            now = datetime.now()
+            cur.execute(
+                f"INSERT INTO {_WORKSPACE_METADATA_TABLE} "
+                "(workspace, semantic_enabled, semantic_version, updated_at, updated_by) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (self._workspace, True, 1, now, user),
+            )
+            return WorkspaceMetadata(
+                workspace=self._workspace,
+                semantic_enabled=True,
+                semantic_version=1,
+                updated_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                updated_by=user,
+            )
+        return self._metadata_from_row(self._workspace, row)
+
+    def get_workspace_metadata(self) -> WorkspaceMetadata:
         self._ensure_tables()
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"USE {_DORIS_DB}")
-                try:
-                    cur.execute(f"SHOW TABLETS FROM {self._active_table}")
-                    rows = cur.fetchall()
-                    if rows and cur.description:
-                        cols = [d[0] for d in cur.description]
-                        if "Version" in cols:
-                            vi = cols.index("Version")
-                            max_ver = max(int(r[vi]) for r in rows)
-                            return StoreState(revision=str(max_ver))
-                except Exception:
-                    pass
-                return StoreState(revision="")
+                return self._get_workspace_metadata_with_cursor(cur)
+        finally:
+            conn.close()
+
+    def set_semantic_enabled(self, enabled: bool, updated_by: str) -> WorkspaceMetadata:
+        self._ensure_tables()
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"USE {_DORIS_DB}")
+                self._get_workspace_metadata_with_cursor(cur)
+                cur.execute(
+                    f"UPDATE {_WORKSPACE_METADATA_TABLE} "
+                    "SET semantic_enabled = %s, updated_at = %s, updated_by = %s "
+                    "WHERE workspace = %s",
+                    (enabled, datetime.now(), updated_by, self._workspace),
+                )
+                return self._get_workspace_metadata_with_cursor(cur)
+        finally:
+            conn.close()
+
+    def bump_semantic_version(self, updated_by: str | None = None) -> WorkspaceMetadata:
+        self._ensure_tables()
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"USE {_DORIS_DB}")
+                self._get_workspace_metadata_with_cursor(cur)
+                user = updated_by or (_request_creds.get() or ("system", ""))[0]
+                cur.execute(
+                    f"UPDATE {_WORKSPACE_METADATA_TABLE} "
+                    "SET semantic_version = semantic_version + 1, "
+                    "updated_at = %s, updated_by = %s WHERE workspace = %s",
+                    (datetime.now(), user, self._workspace),
+                )
+                return self._get_workspace_metadata_with_cursor(cur)
         finally:
             conn.close()
 
@@ -217,7 +315,13 @@ class DorisStore:
             conn.close()
 
         if not rows:
-            return StoreState(revision="", updated_at=None)
+            metadata = self.get_workspace_metadata()
+            return StoreState(
+                revision=str(metadata.semantic_version),
+                updated_at=metadata.updated_at,
+                semantic_enabled=metadata.semantic_enabled,
+                semantic_version=metadata.semantic_version,
+            )
 
         db_filenames: set[str] = set()
         latest_updated: datetime | None = None
@@ -240,12 +344,15 @@ class DorisStore:
                 if rel not in db_filenames:
                     os.remove(full)
 
-        revision = hashlib.sha256(
-            json.dumps(sorted(db_filenames), ensure_ascii=False).encode()
-        ).hexdigest()
+        metadata = self.get_workspace_metadata()
         updated_at = latest_updated.strftime("%Y-%m-%dT%H:%M:%SZ") if latest_updated else None
         logger.info(f"fetch [{self._workspace}]: {len(rows)} files → {local_dir}")
-        return StoreState(revision=revision, updated_at=updated_at)
+        return StoreState(
+            revision=str(metadata.semantic_version),
+            updated_at=updated_at,
+            semantic_enabled=metadata.semantic_enabled,
+            semantic_version=metadata.semantic_version,
+        )
 
     # ------------------------------------------------------------------
     # Active file helpers
@@ -430,10 +537,13 @@ class DorisStore:
                 stg_rows = cur.fetchall()
 
                 if not stg_rows:
-                    cur.execute(f"SELECT MAX(updated_at), COUNT(*) FROM {self._active_table}")
-                    row = cur.fetchone()
-                    revision = hashlib.sha256(f"{row[0]}_{row[1]}".encode()).hexdigest() if row and row[0] else ""
-                    return StoreState(revision=revision)
+                    metadata = self._get_workspace_metadata_with_cursor(cur)
+                    return StoreState(
+                        revision=str(metadata.semantic_version),
+                        updated_at=metadata.updated_at,
+                        semantic_enabled=metadata.semantic_enabled,
+                        semantic_version=metadata.semantic_version,
+                    )
 
                 for fn, action, content, stg_ts in stg_rows:
                     if action == "delete":
@@ -453,19 +563,25 @@ class DorisStore:
 
                 cur.execute(f"DELETE FROM {self._staging_table}")
 
-                cur.execute(f"SELECT MAX(updated_at), COUNT(*) FROM {self._active_table}")
-                row = cur.fetchone()
-                if row and row[0] is not None:
-                    max_ts, cnt = row
-                    revision = hashlib.sha256(f"{max_ts}_{cnt}".encode()).hexdigest()
-                    updated_at = max_ts.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(max_ts, datetime) else str(max_ts)
-                else:
-                    revision, updated_at = "", None
+                self._get_workspace_metadata_with_cursor(cur)
+                user = (_request_creds.get() or ("system", ""))[0]
+                cur.execute(
+                    f"UPDATE {_WORKSPACE_METADATA_TABLE} "
+                    "SET semantic_version = semantic_version + 1, "
+                    "updated_at = %s, updated_by = %s WHERE workspace = %s",
+                    (datetime.now(), user, self._workspace),
+                )
+                metadata = self._get_workspace_metadata_with_cursor(cur)
         finally:
             conn.close()
 
         logger.info(f"staging committed [{self._workspace}]: {len(stg_rows)} changes, staging cleared")
-        return StoreState(revision=revision, updated_at=updated_at)
+        return StoreState(
+            revision=str(metadata.semantic_version),
+            updated_at=metadata.updated_at,
+            semantic_enabled=metadata.semantic_enabled,
+            semantic_version=metadata.semantic_version,
+        )
 
     # ------------------------------------------------------------------
     # Internal
@@ -482,6 +598,17 @@ class DorisStore:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DORIS_DB}")
                 cur.execute(f"USE {_DORIS_DB}")
+                cur.execute(f"""\
+                    CREATE TABLE IF NOT EXISTS {_WORKSPACE_METADATA_TABLE} (
+                        workspace          VARCHAR(128) NOT NULL,
+                        semantic_enabled   TINYINT NOT NULL DEFAULT "1",
+                        semantic_version   BIGINT NOT NULL DEFAULT "1",
+                        updated_at         DATETIME NOT NULL,
+                        updated_by         VARCHAR(256) NULL
+                    ) UNIQUE KEY(workspace)
+                    DISTRIBUTED BY HASH(workspace) BUCKETS 1
+                    PROPERTIES ('replication_num' = '1')
+                """)
                 cur.execute(f"""\
                     CREATE TABLE IF NOT EXISTS {self._active_table} (
                         filename    VARCHAR(512) NOT NULL,
@@ -501,6 +628,7 @@ class DorisStore:
                     DISTRIBUTED BY HASH(filename) BUCKETS 1
                     PROPERTIES ('replication_num' = '1')
                 """)
+                self._get_workspace_metadata_with_cursor(cur)
             self._table_cache[key] = True
             logger.info(f"Tables ensured for workspace '{self._workspace}': {self._active_table}, {self._staging_table}")
         except Exception as e:

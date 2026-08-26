@@ -424,7 +424,3 @@ column MATCH_ANY 'keywords'
 ```
 
 如果中缀语法仍然失败，再检查 Doris 实际版本、查询优化器设置、字段类型以及倒排索引配置。
-
-### 健康检查仍返回 `semantic.mode = preferred`
-
-这通常表示目标节点仍运行旧版服务。CLI 本身不会修改服务端加载策略，需要升级目标 MCP Server 部署。
