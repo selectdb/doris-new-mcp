@@ -116,7 +116,7 @@ fastmcp call http://<host>:3000/mcp check_service_health \
 
 ### 5. 管理语义模型
 
-**Semantic Web UI**（`/mcp/web`）：认证用户可以查看模型；拥有 Doris `admin` 角色的用户可以新建/上传/编辑 YAML 模型 → **Validate** → **Commit**。只有验证通过的模型才会生效。
+**Semantic Web UI**（`/mcp/web`）：认证用户可以查看模型；拥有 Doris `admin` 角色的用户可以新建/上传/编辑 YAML 模型 → **Validate** → **Commit**，并按 workspace 切换 **Semantic queries: ON/OFF**。只有验证通过的模型才会生效。关闭语义查询不会删除模型或 staging 变更，只会阻止语义 MCP 工具，仍可使用只读 SQL。
 
 **CLI 客户端：**
 
@@ -133,8 +133,9 @@ export DORIS_MCP_TOKEN=<user>:<password>
 
 ## Agent 查询数据的流程
 
-查询路径由 `semantic.mode` 控制：`preferred` 保持语义层优先；`optional`
-仅在调用语义工具或 Web UI 时按需加载语义工作区，并允许直接执行只读 SQL。
+Agent 根据用户意图选择查询路径。语义指标工具仅按需加载本次请求的
+workspace；只读 SQL、Doris 搜索和元数据发现不会初始化语义层。打开
+Semantic Web UI 属于显式的语义层操作，会初始化当前 workspace 视图。
 
 `execute_query` 支持单条只读 Doris SQL，包括 sqlglot 尚未建模的 Doris 专有 SELECT 语法；DML、DDL、多语句以及 `SELECT INTO OUTFILE` 仍会被拦截。
 
@@ -147,7 +148,6 @@ export DORIS_MCP_TOKEN=<user>:<password>
 | `query.db_whitelist` | `[]` | 可选的库白名单 |
 | `query.query_timeout_seconds` | `600` | SQL 查询超时 |
 | `query.query_max_rows` | `10000` | 单次查询最大返回行数 |
-| `semantic.mode` | `preferred` | `preferred` 或 `optional` 查询路由与加载策略 |
 
 所有配置值支持 `${ENV_VAR}` 环境变量插值。
 
