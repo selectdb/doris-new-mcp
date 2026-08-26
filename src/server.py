@@ -1644,22 +1644,17 @@ def create_server(
         staging_body += '<div id="ws-result" class="result" style="display:none;margin-top:16px;"></div>'
         
         # Workspace status indicator
-        version_suffix = (
-            f" · v{ws_obj.published_version}" if ws_obj and ws_obj.published_version else ""
-        )
+        status_text = ""
+        status_color = "color:var(--muted);"
         if ws_obj and not ws_obj.enabled:
-            status_text = f"disabled{version_suffix}"
-            status_color = "color:var(--muted);"
+            status_text = "disabled"
         elif ws_obj and ws_obj.is_ready():
             metrics = ws_obj.manifest.list_metrics()
-            status_text = f"healthy · {len(metrics)} metrics{version_suffix}"
+            status_text = f"healthy · {len(metrics)} metrics"
             status_color = "color:#1e8e3e;"
         elif ws_obj and await asyncio.to_thread(ws_obj.store.list_files):
-            status_text = f"not ready{version_suffix}"
+            status_text = "not ready"
             status_color = "color:#e37400;"
-        else:
-            status_text = f"no models{version_suffix}"
-            status_color = "color:var(--muted);"
         if is_admin:
             from store.seed import is_example_deployed
             example_deployed = await asyncio.to_thread(is_example_deployed)
