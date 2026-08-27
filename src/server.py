@@ -1639,9 +1639,7 @@ def create_server(
         # Workspace status indicator
         status_text = ""
         status_color = "color:var(--muted);"
-        if ws_obj and not ws_obj.enabled:
-            status_text = "disabled"
-        elif ws_obj and ws_obj.is_ready():
+        if ws_obj and ws_obj.is_ready():
             metrics = ws_obj.manifest.list_metrics()
             status_text = f"healthy · {len(metrics)} metrics"
             status_color = "color:#1e8e3e;"
