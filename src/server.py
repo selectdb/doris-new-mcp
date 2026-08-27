@@ -655,10 +655,6 @@ def create_server(
             if conn is not None:
                 conn.close()
 
-    def _webui_redirect_login():
-        from starlette.responses import RedirectResponse as _R
-        return _R("/mcp/web/login", status_code=303)
-
     async def _check_semantic_access(
         request: Request, require_admin: bool = False,
     ) -> tuple[str | None, bool, Response | None]:
@@ -711,7 +707,8 @@ def create_server(
                 status_code=401)
 
         if "text/html" in (request.headers.get("accept") or ""):
-            return None, False, _webui_redirect_login()
+            from starlette.responses import HTMLResponse as _HTML
+            return None, False, _HTML(_render_login())
         return None, False, JSONResponse(
             {"success": False, "error": {"code": "UNAUTHORIZED", "message": "Session expired or missing"}},
             status_code=401)
@@ -1456,7 +1453,7 @@ def create_server(
            border-radius: 6px; margin-bottom: 16px; font-size: .85rem; }
 </style></head><body><div class="card"><h1>{{SERVER_NAME}}</h1>
 <p class="sub">Log in with your Doris credentials</p>{{ERROR}}
-<form method="post"><label>Username</label><input name="user" required autofocus>
+<form method="post" action="/mcp/web/login"><label>Username</label><input name="user" required autofocus>
 <label>Password</label><input name="password" type="password">
 <button type="submit">Log in</button></form></div></body></html>"""
 
@@ -1554,24 +1551,20 @@ def create_server(
 
     @mcp.custom_route("/mcp/web", methods=["GET"])
     async def semantic_webui_home(request: Request) -> Response:
-        """Home: redirect to first available workspace models page."""
-        from starlette.responses import RedirectResponse as _R
-        client_id, _, err = await _check_semantic_access(request)
+        """Home: render the first available workspace models page directly."""
+        from starlette.responses import HTMLResponse as _HTML
+        client_id, is_admin, err = await _check_semantic_access(request)
         if err:
             return err
         ws = request.query_params.get("workspace", "")
         if not ws:
             ws_names = multi_watcher.workspace_names()
             ws = ws_names[0] if ws_names else "example"
-        return _R(f"/mcp/web/models?workspace={ws}", status_code=303)
+        return _HTML(await _render_models_page(request, client_id, is_admin, ws))
 
-    @mcp.custom_route("/mcp/web/models", methods=["GET"])
-    async def semantic_webui_models(request: Request) -> Response:
-        from starlette.responses import HTMLResponse as _HTML
-        client_id, is_admin, err = await _check_semantic_access(request)
-        if err:
-            return err
-        ws = _get_workspace_from_request(request)
+    async def _render_models_page(
+        request: Request, client_id: str, is_admin: bool, ws: str
+    ) -> str:
         st = await asyncio.to_thread(_get_store, ws)
         ws_obj = await asyncio.to_thread(multi_watcher.ensure_fresh, ws)
 
@@ -1695,8 +1688,16 @@ def create_server(
                 '<span class="btn btn-sm" style="cursor:default;">Semantic queries: ' + enabled_text + '</span>'
             )
         body = "{{ACTIVE_PANEL}}" + active_body + "{{STAGING_PANEL}}" + staging_body
-        html = _render_page(body, client_id, is_admin, ws, ws_actions_html)
-        return _HTML(html)
+        return _render_page(body, client_id, is_admin, ws, ws_actions_html)
+
+    @mcp.custom_route("/mcp/web/models", methods=["GET"])
+    async def semantic_webui_models(request: Request) -> Response:
+        from starlette.responses import HTMLResponse as _HTML
+        client_id, is_admin, err = await _check_semantic_access(request)
+        if err:
+            return err
+        ws = _get_workspace_from_request(request)
+        return _HTML(await _render_models_page(request, client_id, is_admin, ws))
 
     @mcp.custom_route("/mcp/web/new", methods=["GET"])
     async def semantic_webui_new(request: Request) -> Response:
