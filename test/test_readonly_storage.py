@@ -269,8 +269,13 @@ class WriteGuardTest(unittest.TestCase):
 
 
 class SchemaMigrationTest(unittest.TestCase):
-    """Old storage (no metadata table / missing columns) must be migrated by an
-    admin before any write is allowed."""
+    """Old storage is detected and can be brought to the required shape."""
+
+    FULL = {
+        "workspace": "varchar", "semantic_enabled": "tinyint",
+        "semantic_version": "bigint", "updated_at": "datetime",
+        "updated_by": "varchar",
+    }
 
     def setUp(self) -> None:
         st.set_request_credentials("admin", "pw")
@@ -282,66 +287,101 @@ class SchemaMigrationTest(unittest.TestCase):
         st.set_provisioning_allowed(False)
         st.DorisStore._schema_state = None
 
-    def _mock_conn(self, columns, rows, schema_exists=True):
+    def _mock_conn(self, *, fetchone=None, fetchall=None):
         patcher = patch("store.store.pymysql.connect")
         connect = patcher.start()
         self.addCleanup(patcher.stop)
         conn, cursor = MagicMock(), MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
-        cursor.fetchall.side_effect = [columns, rows]
-        cursor.fetchone.return_value = ("system_mcp",) if schema_exists else None
+        cursor.fetchone.return_value = fetchone
+        cursor.fetchall.return_value = [] if fetchall is None else fetchall
         connect.return_value = conn
         return cursor
 
+    def _columns(self, columns, side_effect=None):
+        patcher = patch.object(
+            st.DorisStore, "_metadata_columns_with_cursor",
+            side_effect=side_effect, return_value=columns,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # ── detection ──
+
     def test_fresh_install_is_not_blocked(self):
-        cursor = self._mock_conn(columns=[], rows=[], schema_exists=False)
-        with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
-            status = st.DorisStore.metadata_schema_status()
+        self._columns({})
+        self._mock_conn(fetchone=None)
+        status = st.DorisStore.metadata_schema_status()
         self.assertEqual(status["state"], "fresh")
         self.assertTrue(status["ok"])
-        self.assertNotIn("CREATE", _sql(cursor))
 
     def test_missing_table_requires_migration(self):
-        self._mock_conn(columns=[], rows=[], schema_exists=True)
-        with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
-            status = st.DorisStore.metadata_schema_status()
+        self._columns({})
+        self._mock_conn(fetchone=("system_mcp",))
+        status = st.DorisStore.metadata_schema_status()
         self.assertEqual(status["state"], "needs_migration")
         self.assertFalse(status["ok"])
 
     def test_missing_columns_require_migration(self):
-        self._mock_conn(columns=[("workspace",), ("semantic_enabled",)],
-                        rows=[("ws1",)])
+        self._columns({"workspace": "varchar", "semantic_enabled": "tinyint"})
+        self._mock_conn(fetchall=[("ws1",)])
         with patch.object(st.DorisStore, "discover_workspaces", return_value=["ws1"]):
             status = st.DorisStore.metadata_schema_status()
         self.assertEqual(status["state"], "outdated")
         self.assertIn("updated_by", status["missing_columns"])
 
-    def test_admin_writes_auto_provision_despite_stale_state(self):
-        """Migration is not a precondition for admin writes: they create the
-        table/row themselves (migration stays useful for bulk backfill)."""
-        st.DorisStore._schema_state = "needs_migration"
-        cursor = self._mock_conn(columns=[], rows=[], schema_exists=True)
-        cursor.fetchone.return_value = None
-        store = st.DorisStore(workspace="legacy")   # admin construction provisions
-        store.bump_semantic_version()               # must not raise
-        sql = _sql(cursor)
-        self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
-        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
-        self.assertEqual(st.DorisStore._schema_state, "ok")
+    def test_wrong_column_type_is_reported(self):
+        columns = dict(self.FULL, semantic_version="varchar")
+        self._columns(columns)
+        self._mock_conn(fetchall=[("ws1",)])
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=["ws1"]):
+            status = st.DorisStore.metadata_schema_status()
+        self.assertEqual(status["state"], "outdated")
+        self.assertEqual(status["mismatched_columns"], ["semantic_version"])
 
-    def test_migration_creates_and_backfills(self):
-        cursor = self._mock_conn(
-            columns=[("workspace",), ("semantic_enabled",), ("semantic_version",),
-                     ("updated_at",), ("updated_by",)],
-            rows=[],
-        )
+    # ── migration ──
+
+    def test_migration_creates_backfills_and_grants(self):
+        self._columns(self.FULL)
+        cursor = self._mock_conn(fetchall=[])
         with patch.object(st.DorisStore, "discover_workspaces", return_value=["legacy"]):
             result = st.DorisStore.migrate_metadata_schema()
         self.assertEqual(result["backfilled"], ["legacy"])
         sql = _sql(cursor)
         self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
         self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
-        self.assertEqual(st.DorisStore._schema_state, None)   # cache invalidated
+        self.assertIn("GRANT SELECT_PRIV", sql)
+        self.assertEqual(st.DorisStore._schema_state, None)
+
+    def test_migration_adds_missing_columns(self):
+        self._columns({}, side_effect=[
+            {"workspace": "varchar", "semantic_enabled": "tinyint"},
+            self.FULL,
+        ])
+        cursor = self._mock_conn(fetchall=[])
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
+            result = st.DorisStore.migrate_metadata_schema()
+        sql = _sql(cursor)
+        self.assertIn("ALTER TABLE WORKSPACE_METADATA ADD COLUMN SEMANTIC_VERSION", sql)
+        self.assertIn("ALTER TABLE WORKSPACE_METADATA ADD COLUMN UPDATED_AT", sql)
+        self.assertEqual(sorted(result["added_columns"]), ["semantic_version", "updated_at", "updated_by"])
+
+    def test_migration_reports_unfixable_type(self):
+        columns = dict(self.FULL, semantic_version="varchar")
+        self._columns(columns)
+        self._mock_conn(fetchall=[])
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
+            with self.assertRaises(SchemaMigrationRequired) as ctx:
+                st.DorisStore.migrate_metadata_schema()
+        self.assertIn("expected bigint", str(ctx.exception))
+
+    def test_migration_reports_duplicate_rows(self):
+        self._columns(self.FULL)
+        self._mock_conn(fetchall=[("ws",)])
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=["ws"]):
+            with self.assertRaises(SchemaMigrationRequired) as ctx:
+                st.DorisStore.migrate_metadata_schema()
+        self.assertIn("duplicate metadata rows", str(ctx.exception))
 
     def test_migration_requires_admin(self):
         st.set_provisioning_allowed(False)

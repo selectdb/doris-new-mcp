@@ -68,6 +68,23 @@ _DORIS_PORT = 9030
 _DORIS_DB = "system_mcp"
 _WORKSPACE_METADATA_TABLE = "workspace_metadata"
 
+# Required shape of the control table. Types are compared by information_schema
+# DATA_TYPE prefix (varchar/tinyint/bigint/datetime).
+_METADATA_REQUIRED = {
+    "workspace": "varchar",
+    "semantic_enabled": "tinyint",
+    "semantic_version": "bigint",
+    "updated_at": "datetime",
+    "updated_by": "varchar",
+}
+# Columns the migration can add. workspace is the key; it cannot be added.
+_METADATA_ADD_DDL = {
+    "semantic_enabled": 'TINYINT NOT NULL DEFAULT "1"',
+    "semantic_version": 'BIGINT NOT NULL DEFAULT "1"',
+    "updated_at": "DATETIME NULL",
+    "updated_by": "VARCHAR(256) NULL",
+}
+
 # Workspace names become table-name fragments (active_store_<ws>), so they must
 # be plain identifiers. Without this, a crafted "workspace" query parameter or
 # request field could inject SQL into every store statement.
@@ -222,9 +239,10 @@ def _is_missing_schema_error(exc: Exception) -> bool:
     code = args[0] if args and isinstance(args[0], int) else None
     message = str(exc).lower()
     return (
-        code in (1049, 1146)
+        code in (1049, 1054, 1146)
         or "unknown database" in message
         or "unknown table" in message
+        or "unknown column" in message
         or "doesn't exist" in message
     )
 
@@ -808,25 +826,25 @@ class DorisStore:
     _schema_state: str | None = None
 
     @classmethod
-    def _metadata_columns_with_cursor(cls, cur) -> set[str]:
+    def _metadata_columns_with_cursor(cls, cur) -> dict[str, str]:
+        """Return {column_name: data_type} for workspace_metadata."""
         cur.execute(
-            "SELECT COLUMN_NAME FROM information_schema.columns "
+            "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns "
             "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
             (_DORIS_DB, _WORKSPACE_METADATA_TABLE),
         )
-        return {str(row[0]).lower() for row in cur.fetchall()}
+        return {str(row[0]).lower(): str(row[1]).lower() for row in cur.fetchall()}
 
     @classmethod
     def metadata_schema_status(cls) -> dict:
         """Inspect the metadata storage without writing.
 
-        Returns a state used to decide whether writes must be blocked:
-          ok              table exists with all required columns
+        state:
+          ok              table exists with all required columns/types
           fresh           no storage database yet (nothing to migrate)
-          needs_migration database/tables exist but the metadata table is absent
-          outdated        metadata table exists but lacks required columns
-        ``missing_rows`` lists workspaces with tables but no metadata row; those
-        are backfilled by the migration or by the next admin write.
+          needs_migration database exists but the metadata table is absent
+          outdated        table exists but columns are missing or mistyped
+        ``missing_rows`` lists workspaces with tables but no metadata row.
         """
         conn = _get_conn()
         try:
@@ -839,11 +857,13 @@ class DorisStore:
                     )
                     state = "fresh" if cur.fetchone() is None else "needs_migration"
                     return {"state": state, "ok": state == "fresh",
-                            "missing_columns": [], "missing_rows": []}
+                            "missing_columns": [], "mismatched_columns": [],
+                            "missing_rows": []}
 
-                missing_columns = sorted(
-                    {"workspace", "semantic_enabled", "semantic_version",
-                     "updated_at", "updated_by"} - columns
+                missing = sorted(set(_METADATA_REQUIRED) - columns.keys())
+                mismatched = sorted(
+                    name for name, expected in _METADATA_REQUIRED.items()
+                    if name in columns and not columns[name].startswith(expected)
                 )
                 cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
                 present = {str(row[0]) for row in cur.fetchall()}
@@ -851,15 +871,27 @@ class DorisStore:
             conn.close()
 
         missing_rows = [w for w in cls.discover_workspaces() if w not in present]
-        state = "outdated" if missing_columns else "ok"
+        state = "outdated" if (missing or mismatched) else "ok"
         return {"state": state, "ok": state == "ok",
-                "missing_columns": missing_columns, "missing_rows": missing_rows}
+                "missing_columns": missing, "mismatched_columns": mismatched,
+                "missing_rows": missing_rows}
 
     @classmethod
     def migrate_metadata_schema(cls) -> dict:
-        """Create/backfill the metadata storage. Admin-only (runs DDL/DML)."""
+        """Bring workspace_metadata to the required shape, then backfill rows.
+
+        Steps: create database/table, ADD missing columns, detect columns whose
+        types cannot be fixed automatically or duplicate rows, insert one row per
+        active_store_* workspace (skipping ones that appear concurrently), and
+        grant read access. Anything that still needs a human is reported.
+        """
         if not provisioning_allowed():
             raise WriteNotAllowed("Schema migration requires a Doris administrator")
+
+        added_columns: list[str] = []
+        backfilled: list[str] = []
+        skipped: list[str] = []
+        problems: list[str] = []
 
         conn = _get_conn()
         try:
@@ -877,36 +909,77 @@ class DorisStore:
                     DISTRIBUTED BY HASH(workspace) BUCKETS 1
                     PROPERTIES ('replication_num' = '1')
                 """)
+
                 columns = cls._metadata_columns_with_cursor(cur)
-                missing_columns = sorted(
-                    {"workspace", "semantic_enabled", "semantic_version",
-                     "updated_at", "updated_by"} - columns
-                )
+                for name in sorted(set(_METADATA_ADD_DDL) & (set(_METADATA_REQUIRED) - columns.keys())):
+                    try:
+                        cur.execute(
+                            f"ALTER TABLE {_WORKSPACE_METADATA_TABLE} "
+                            f"ADD COLUMN {name} {_METADATA_ADD_DDL[name]}"
+                        )
+                        added_columns.append(name)
+                    except Exception as exc:
+                        problems.append(f"cannot add column {name}: {exc}")
+
+                columns = cls._metadata_columns_with_cursor(cur)
+                for name, expected in _METADATA_REQUIRED.items():
+                    if name not in columns:
+                        problems.append(f"missing column {name}")
+                    elif not columns[name].startswith(expected):
+                        problems.append(
+                            f"column {name} has type {columns[name]}, expected {expected}"
+                        )
+
+                try:
+                    cur.execute(
+                        f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE} "
+                        "GROUP BY workspace HAVING COUNT(*) > 1"
+                    )
+                    duplicates = [str(row[0]) for row in cur.fetchall()]
+                    if duplicates:
+                        problems.append(
+                            "duplicate metadata rows for: " + ", ".join(sorted(duplicates))
+                        )
+                except Exception:
+                    logger.warning("Duplicate check skipped (query unsupported)")
+
                 cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
                 present = {str(row[0]) for row in cur.fetchall()}
                 user = (_request_creds.get() or ("system", ""))[0]
-                added = []
                 for workspace in cls.discover_workspaces():
                     if workspace in present:
                         continue
-                    cur.execute(
-                        f"INSERT INTO {_WORKSPACE_METADATA_TABLE} "
-                        "(workspace, semantic_enabled, semantic_version, updated_at, updated_by) "
-                        "VALUES (%s, %s, %s, %s, %s)",
-                        (workspace, True, 1, datetime.now(), user),
-                    )
-                    added.append(workspace)
+                    try:
+                        cur.execute(
+                            f"INSERT INTO {_WORKSPACE_METADATA_TABLE} "
+                            "(workspace, semantic_enabled, semantic_version, updated_at, updated_by) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            (workspace, True, 1, datetime.now(), user),
+                        )
+                        backfilled.append(workspace)
+                    except Exception as exc:
+                        # A concurrent migration may have inserted it already.
+                        if "duplicate" in str(exc).lower():
+                            skipped.append(workspace)
+                        else:
+                            raise
+
                 cls._grant_metadata_read(cur)
         finally:
             conn.close()
 
         cls._schema_state = None
-        if missing_columns:
+        if problems:
             raise SchemaMigrationRequired(
-                "Metadata table is missing columns: " + ", ".join(missing_columns)
+                "Semantic metadata storage still needs manual attention: "
+                + "; ".join(problems)
             )
-        logger.info("Metadata schema migrated; backfilled rows: %s", added or "none")
-        return {"created": True, "backfilled": added}
+        logger.info(
+            "Metadata schema migrated; added columns: %s, backfilled: %s, skipped: %s",
+            added_columns or "none", backfilled or "none", skipped or "none",
+        )
+        return {"created": True, "added_columns": added_columns,
+                "backfilled": backfilled, "skipped": skipped}
 
     def _require_write(self) -> None:
         """Reject mutations unless the current request may provision storage.
