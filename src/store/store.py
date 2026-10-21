@@ -880,10 +880,10 @@ class DorisStore:
     def migrate_metadata_schema(cls) -> dict:
         """Bring workspace_metadata to the required shape, then backfill rows.
 
-        Steps: create database/table, ADD missing columns, detect columns whose
-        types cannot be fixed automatically or duplicate rows, insert one row per
-        active_store_* workspace (skipping ones that appear concurrently), and
-        grant read access. Anything that still needs a human is reported.
+        Safety rule: verify first, write second. If an existing table has
+        duplicates, a wrong key model, or an unfixable column type, the
+        migration aborts before ALTER/INSERT/GRANT and reports what a human
+        must look at. Only a table that passes verification is repaired.
         """
         if not provisioning_allowed():
             raise WriteNotAllowed("Schema migration requires a Doris administrator")
@@ -893,58 +893,89 @@ class DorisStore:
         skipped: list[str] = []
         problems: list[str] = []
 
+        def abort_if_problems() -> None:
+            if problems:
+                raise SchemaMigrationRequired(
+                    "Semantic metadata storage needs manual attention: "
+                    + "; ".join(problems)
+                )
+
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DORIS_DB}")
                 cur.execute(f"USE {_DORIS_DB}")
-                cur.execute(f"""\
-                    CREATE TABLE IF NOT EXISTS {_WORKSPACE_METADATA_TABLE} (
-                        workspace          VARCHAR(128) NOT NULL,
-                        semantic_enabled   TINYINT NOT NULL DEFAULT "1",
-                        semantic_version   BIGINT NOT NULL DEFAULT "1",
-                        updated_at         DATETIME NOT NULL,
-                        updated_by         VARCHAR(256) NULL
-                    ) UNIQUE KEY(workspace)
-                    DISTRIBUTED BY HASH(workspace) BUCKETS 1
-                    PROPERTIES ('replication_num' = '1')
-                """)
 
                 columns = cls._metadata_columns_with_cursor(cur)
-                for name in sorted(set(_METADATA_ADD_DDL) & (set(_METADATA_REQUIRED) - columns.keys())):
+                existed = bool(columns)
+
+                if not existed:
+                    cur.execute(f"""\
+                        CREATE TABLE IF NOT EXISTS {_WORKSPACE_METADATA_TABLE} (
+                            workspace          VARCHAR(128) NOT NULL,
+                            semantic_enabled   TINYINT NOT NULL DEFAULT "1",
+                            semantic_version   BIGINT NOT NULL DEFAULT "1",
+                            updated_at         DATETIME NOT NULL,
+                            updated_by         VARCHAR(256) NULL
+                        ) UNIQUE KEY(workspace)
+                        DISTRIBUTED BY HASH(workspace) BUCKETS 1
+                        PROPERTIES ('replication_num' = '1')
+                    """)
+                    columns = cls._metadata_columns_with_cursor(cur)
+                else:
+                    # ---- verify before touching anything ----
+                    try:
+                        cur.execute(f"SHOW CREATE TABLE {_WORKSPACE_METADATA_TABLE}")
+                        row = cur.fetchone()
+                        ddl = str(row[1]).upper() if row and len(row) > 1 else ""
+                        if ddl and ("UNIQUE KEY" not in ddl or "WORKSPACE" not in ddl):
+                            problems.append("table is not UNIQUE KEY(workspace)")
+                    except Exception:
+                        logger.warning("Key-model check skipped (SHOW CREATE failed)")
+
                     try:
                         cur.execute(
-                            f"ALTER TABLE {_WORKSPACE_METADATA_TABLE} "
-                            f"ADD COLUMN {name} {_METADATA_ADD_DDL[name]}"
+                            f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE} "
+                            "GROUP BY workspace HAVING COUNT(*) > 1"
                         )
-                        added_columns.append(name)
-                    except Exception as exc:
-                        problems.append(f"cannot add column {name}: {exc}")
+                        duplicates = [str(r[0]) for r in cur.fetchall()]
+                        if duplicates:
+                            problems.append(
+                                "duplicate metadata rows for: "
+                                + ", ".join(sorted(duplicates))
+                            )
+                    except Exception:
+                        logger.warning("Duplicate check skipped (query unsupported)")
 
-                columns = cls._metadata_columns_with_cursor(cur)
-                for name, expected in _METADATA_REQUIRED.items():
-                    if name not in columns:
-                        problems.append(f"missing column {name}")
-                    elif not columns[name].startswith(expected):
-                        problems.append(
-                            f"column {name} has type {columns[name]}, expected {expected}"
-                        )
+                    for name, expected in _METADATA_REQUIRED.items():
+                        if name in columns and not columns[name].startswith(expected):
+                            problems.append(
+                                f"column {name} has type {columns[name]}, "
+                                f"expected {expected}"
+                            )
 
-                try:
-                    cur.execute(
-                        f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE} "
-                        "GROUP BY workspace HAVING COUNT(*) > 1"
-                    )
-                    duplicates = [str(row[0]) for row in cur.fetchall()]
-                    if duplicates:
-                        problems.append(
-                            "duplicate metadata rows for: " + ", ".join(sorted(duplicates))
-                        )
-                except Exception:
-                    logger.warning("Duplicate check skipped (query unsupported)")
+                    abort_if_problems()   # nothing has been written yet
 
+                    for name in sorted(set(_METADATA_ADD_DDL) &
+                                       (set(_METADATA_REQUIRED) - columns.keys())):
+                        try:
+                            cur.execute(
+                                f"ALTER TABLE {_WORKSPACE_METADATA_TABLE} "
+                                f"ADD COLUMN {name} {_METADATA_ADD_DDL[name]}"
+                            )
+                            added_columns.append(name)
+                        except Exception as exc:
+                            problems.append(f"cannot add column {name}: {exc}")
+
+                    if added_columns:
+                        columns = cls._metadata_columns_with_cursor(cur)
+                        for name in set(_METADATA_REQUIRED) - columns.keys():
+                            problems.append(f"missing column {name}")
+                        abort_if_problems()
+
+                # ---- verified: backfill + grant ----
                 cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
-                present = {str(row[0]) for row in cur.fetchall()}
+                present = {str(r[0]) for r in cur.fetchall()}
                 user = (_request_creds.get() or ("system", ""))[0]
                 for workspace in cls.discover_workspaces():
                     if workspace in present:
@@ -958,7 +989,6 @@ class DorisStore:
                         )
                         backfilled.append(workspace)
                     except Exception as exc:
-                        # A concurrent migration may have inserted it already.
                         if "duplicate" in str(exc).lower():
                             skipped.append(workspace)
                         else:
@@ -969,11 +999,6 @@ class DorisStore:
             conn.close()
 
         cls._schema_state = None
-        if problems:
-            raise SchemaMigrationRequired(
-                "Semantic metadata storage still needs manual attention: "
-                + "; ".join(problems)
-            )
         logger.info(
             "Metadata schema migrated; added columns: %s, backfilled: %s, skipped: %s",
             added_columns or "none", backfilled or "none", skipped or "none",

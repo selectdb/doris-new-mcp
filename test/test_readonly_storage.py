@@ -348,7 +348,6 @@ class SchemaMigrationTest(unittest.TestCase):
             result = st.DorisStore.migrate_metadata_schema()
         self.assertEqual(result["backfilled"], ["legacy"])
         sql = _sql(cursor)
-        self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
         self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
         self.assertIn("GRANT SELECT_PRIV", sql)
         self.assertEqual(st.DorisStore._schema_state, None)
@@ -369,19 +368,28 @@ class SchemaMigrationTest(unittest.TestCase):
     def test_migration_reports_unfixable_type(self):
         columns = dict(self.FULL, semantic_version="varchar")
         self._columns(columns)
-        self._mock_conn(fetchall=[])
+        cursor = self._mock_conn(fetchall=[])
         with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
             with self.assertRaises(SchemaMigrationRequired) as ctx:
                 st.DorisStore.migrate_metadata_schema()
         self.assertIn("expected bigint", str(ctx.exception))
+        # verify-before-write: nothing may be altered/inserted/granted
+        sql = _sql(cursor)
+        for verb in ("ALTER TABLE", "INSERT INTO", "GRANT SELECT_PRIV",
+                     "CREATE TABLE IF NOT EXISTS", "DELETE FROM", "UPDATE "):
+            self.assertNotIn(verb, sql)
 
     def test_migration_reports_duplicate_rows(self):
         self._columns(self.FULL)
-        self._mock_conn(fetchall=[("ws",)])
+        cursor = self._mock_conn(fetchall=[("ws",)])
         with patch.object(st.DorisStore, "discover_workspaces", return_value=["ws"]):
             with self.assertRaises(SchemaMigrationRequired) as ctx:
                 st.DorisStore.migrate_metadata_schema()
         self.assertIn("duplicate metadata rows", str(ctx.exception))
+        sql = _sql(cursor)
+        for verb in ("ALTER TABLE", "INSERT INTO", "GRANT SELECT_PRIV",
+                     "CREATE TABLE IF NOT EXISTS", "DELETE FROM", "UPDATE "):
+            self.assertNotIn(verb, sql)
 
     def test_migration_requires_admin(self):
         st.set_provisioning_allowed(False)
