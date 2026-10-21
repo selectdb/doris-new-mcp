@@ -525,11 +525,13 @@ def create_server(
         client error (400), not a 500 from the exception bubbling out.
         """
         from starlette.exceptions import HTTPException as _HTTPException
-        from store.store import DorisStore as _DS
+        from store.store import DorisStore as _DS, SchemaMigrationRequired
         try:
             return _DS(workspace=workspace)
         except ValueError as exc:
             raise _HTTPException(status_code=400, detail=str(exc)) from exc
+        except SchemaMigrationRequired as exc:
+            raise _HTTPException(status_code=409, detail=str(exc)) from exc
 
     from starlette.datastructures import UploadFile as _UploadFile
 
@@ -1602,6 +1604,28 @@ def create_server(
     async def _render_models_page(
         request: Request, client_id: str, is_admin: bool, ws: str
     ) -> str:
+        from store.store import DorisStore as _DS
+        schema = await asyncio.to_thread(_DS.metadata_schema_status)
+        if schema["state"] in ("needs_migration", "outdated"):
+            if is_admin:
+                detail = (
+                    "Semantic metadata storage needs migration"
+                    + (": missing columns " + ", ".join(schema["missing_columns"])
+                       if schema["missing_columns"] else
+                       " (database exists but workspace_metadata is missing)")
+                    + ". Writes are blocked until it succeeds."
+                )
+                action = ('<button class="btn btn-sm btn-primary" onclick="migrateMetadata()">'
+                          'Migrate metadata</button><span id="migrate-result" style="margin-left:8px;"></span>')
+            else:
+                detail = ("Semantic metadata storage needs migration. "
+                          "Ask a Doris administrator to run it in the Semantic Web UI.")
+                action = ""
+            body = ('<div class="panel" style="grid-column:1/-1;"><div class="panel-body">'
+                    f'<div class="flash flash-err">⚠️ {detail} {action}</div>'
+                    '</div></div>')
+            return _render_page(body, client_id, is_admin, ws)
+
         st = await asyncio.to_thread(_get_store, ws)
         ws_obj = await asyncio.to_thread(multi_watcher.ensure_fresh, ws)
 
@@ -1724,6 +1748,28 @@ def create_server(
             )
         body = "{{ACTIVE_PANEL}}" + active_body + "{{STAGING_PANEL}}" + staging_body
         return _render_page(body, client_id, is_admin, ws, ws_actions_html)
+
+    @mcp.custom_route("/mcp/web/migrations/metadata", methods=["POST"])
+    async def api_migrate_metadata(request: Request) -> Response:
+        """Admin-triggered migration of the semantic metadata storage."""
+        client_id, err = await _check_admin_access(request)
+        if err:
+            return err
+        from store.store import DorisStore as _DS
+        try:
+            result = await asyncio.to_thread(_DS.migrate_metadata_schema)
+        except Exception as exc:
+            logger.exception("Metadata migration failed")
+            log_tool_call("migrate_metadata", client_id=client_id,
+                          success=False, error=str(exc))
+            return _JSONResponse(
+                {"success": False,
+                 "error": {"code": "MIGRATION_FAILED", "message": str(exc)}},
+                status_code=500,
+            )
+        log_tool_call("migrate_metadata", client_id=client_id, success=True,
+                      params={"backfilled": result.get("backfilled", [])})
+        return _JSONResponse({"success": True, "data": result})
 
     @mcp.custom_route("/mcp/web/models", methods=["GET"])
     async def semantic_webui_models(request: Request) -> Response:
@@ -1871,6 +1917,15 @@ function pollExampleStatus(el,n) {
   }).catch(function(e){
     if(el){el.textContent="❌ "+e.message;el.style.background="#fce8e6";}
   });
+}
+function migrateMetadata(){
+  var el=document.getElementById("migrate-result");
+  if(el){el.textContent="⏳ migrating...";}
+  fetch("/mcp/web/migrations/metadata",{method:"POST"})
+    .then(r=>r.json()).then(d=>{
+      if(d.success){ if(el){el.textContent="✅ done, reloading";} location.reload(); }
+      else if(el){el.textContent="❌ "+((d.error&&d.error.message)||"failed");}
+    }).catch(e=>{ if(el){el.textContent="❌ "+e;} });
 }
 function wsAction(url,label) {
   var ws=new URLSearchParams(window.location.search).get("workspace")||"example";

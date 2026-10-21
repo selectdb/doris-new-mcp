@@ -24,7 +24,11 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import store.store as st  # noqa: E402
-from store.store import SemanticStorageNotInitialized, WriteNotAllowed  # noqa: E402
+from store.store import (  # noqa: E402
+    SchemaMigrationRequired,
+    SemanticStorageNotInitialized,
+    WriteNotAllowed,
+)
 
 
 def _sql(cursor: MagicMock) -> str:
@@ -242,6 +246,86 @@ class WriteGuardTest(unittest.TestCase):
         for verb in ("INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "GRANT"):
             # Word boundary: "UPDATED_AT" is a column, not an UPDATE statement.
             self.assertIsNone(re.search(rf"\b{verb}\b", stores), verb)
+
+
+class SchemaMigrationTest(unittest.TestCase):
+    """Old storage (no metadata table / missing columns) must be migrated by an
+    admin before any write is allowed."""
+
+    def setUp(self) -> None:
+        st.set_request_credentials("admin", "pw")
+        st.set_provisioning_allowed(True)
+        st.DorisStore._schema_state = None
+        st.DorisStore._table_cache.clear()
+
+    def tearDown(self) -> None:
+        st.set_provisioning_allowed(False)
+        st.DorisStore._schema_state = None
+
+    def _mock_conn(self, columns, rows, schema_exists=True):
+        patcher = patch("store.store.pymysql.connect")
+        connect = patcher.start()
+        self.addCleanup(patcher.stop)
+        conn, cursor = MagicMock(), MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        cursor.fetchall.side_effect = [columns, rows]
+        cursor.fetchone.return_value = ("system_mcp",) if schema_exists else None
+        connect.return_value = conn
+        return cursor
+
+    def test_fresh_install_is_not_blocked(self):
+        cursor = self._mock_conn(columns=[], rows=[], schema_exists=False)
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
+            status = st.DorisStore.metadata_schema_status()
+        self.assertEqual(status["state"], "fresh")
+        self.assertTrue(status["ok"])
+        self.assertNotIn("CREATE", _sql(cursor))
+
+    def test_missing_table_requires_migration(self):
+        self._mock_conn(columns=[], rows=[], schema_exists=True)
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
+            status = st.DorisStore.metadata_schema_status()
+        self.assertEqual(status["state"], "needs_migration")
+        self.assertFalse(status["ok"])
+
+    def test_missing_columns_require_migration(self):
+        self._mock_conn(columns=[("workspace",), ("semantic_enabled",)],
+                        rows=[("ws1",)])
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=["ws1"]):
+            status = st.DorisStore.metadata_schema_status()
+        self.assertEqual(status["state"], "outdated")
+        self.assertIn("updated_by", status["missing_columns"])
+
+    def test_writes_blocked_until_migrated(self):
+        st.DorisStore._schema_state = "needs_migration"
+        st.set_provisioning_allowed(False)     # read-only construction is allowed
+        store = st.DorisStore(workspace="legacy")
+        st.set_provisioning_allowed(True)      # admin write is blocked
+        with self.assertRaises(SchemaMigrationRequired):
+            store.staging_commit()
+        with patch("store.store.pymysql.connect") as connect:
+            with self.assertRaises(SchemaMigrationRequired):
+                st.DorisStore(workspace="legacy2")   # constructor must not migrate
+        connect.assert_not_called()
+
+    def test_migration_creates_and_backfills(self):
+        cursor = self._mock_conn(
+            columns=[("workspace",), ("semantic_enabled",), ("semantic_version",),
+                     ("updated_at",), ("updated_by",)],
+            rows=[],
+        )
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=["legacy"]):
+            result = st.DorisStore.migrate_metadata_schema()
+        self.assertEqual(result["backfilled"], ["legacy"])
+        sql = _sql(cursor)
+        self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
+        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
+        self.assertEqual(st.DorisStore._schema_state, None)   # cache invalidated
+
+    def test_migration_requires_admin(self):
+        st.set_provisioning_allowed(False)
+        with self.assertRaises(WriteNotAllowed):
+            st.DorisStore.migrate_metadata_schema()
 
 
 class ProvisioningFlagTest(unittest.TestCase):

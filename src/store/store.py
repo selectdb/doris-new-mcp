@@ -116,6 +116,11 @@ class SemanticStorageNotInitialized(RuntimeError):
     """Storage is missing and this caller may not create it."""
 
 
+class SchemaMigrationRequired(RuntimeError):
+    """The semantic metadata table is missing/outdated; writes are blocked
+    until an administrator runs the migration from the Semantic Web UI."""
+
+
 class WriteNotAllowed(RuntimeError):
     """A mutating store method was reached from a read-only request.
 
@@ -772,6 +777,108 @@ class DorisStore:
 
     _table_cache: dict[str, bool] = {}
 
+    _schema_state: str | None = None
+
+    @classmethod
+    def _metadata_columns_with_cursor(cls, cur) -> set[str]:
+        cur.execute(
+            "SELECT COLUMN_NAME FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+            (_DORIS_DB, _WORKSPACE_METADATA_TABLE),
+        )
+        return {str(row[0]).lower() for row in cur.fetchall()}
+
+    @classmethod
+    def metadata_schema_status(cls) -> dict:
+        """Inspect the metadata storage without writing.
+
+        Returns a state used to decide whether writes must be blocked:
+          ok              table exists with all required columns
+          fresh           no storage database yet (nothing to migrate)
+          needs_migration database/tables exist but the metadata table is absent
+          outdated        metadata table exists but lacks required columns
+        ``missing_rows`` lists workspaces with tables but no metadata row; those
+        are backfilled by the migration or by the next admin write.
+        """
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                columns = cls._metadata_columns_with_cursor(cur)
+                if not columns:
+                    cur.execute(
+                        "SELECT SCHEMA_NAME FROM information_schema.schemata "
+                        "WHERE SCHEMA_NAME = %s", (_DORIS_DB,),
+                    )
+                    state = "fresh" if cur.fetchone() is None else "needs_migration"
+                    return {"state": state, "ok": state == "fresh",
+                            "missing_columns": [], "missing_rows": []}
+
+                missing_columns = sorted(
+                    {"workspace", "semantic_enabled", "semantic_version",
+                     "updated_at", "updated_by"} - columns
+                )
+                cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
+                present = {str(row[0]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+
+        missing_rows = [w for w in cls.discover_workspaces() if w not in present]
+        state = "outdated" if missing_columns else "ok"
+        return {"state": state, "ok": state == "ok",
+                "missing_columns": missing_columns, "missing_rows": missing_rows}
+
+    @classmethod
+    def migrate_metadata_schema(cls) -> dict:
+        """Create/backfill the metadata storage. Admin-only (runs DDL/DML)."""
+        if not provisioning_allowed():
+            raise WriteNotAllowed("Schema migration requires a Doris administrator")
+
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DORIS_DB}")
+                cur.execute(f"USE {_DORIS_DB}")
+                cur.execute(f"""\
+                    CREATE TABLE IF NOT EXISTS {_WORKSPACE_METADATA_TABLE} (
+                        workspace          VARCHAR(128) NOT NULL,
+                        semantic_enabled   TINYINT NOT NULL DEFAULT "1",
+                        semantic_version   BIGINT NOT NULL DEFAULT "1",
+                        updated_at         DATETIME NOT NULL,
+                        updated_by         VARCHAR(256) NULL
+                    ) UNIQUE KEY(workspace)
+                    DISTRIBUTED BY HASH(workspace) BUCKETS 1
+                    PROPERTIES ('replication_num' = '1')
+                """)
+                columns = cls._metadata_columns_with_cursor(cur)
+                missing_columns = sorted(
+                    {"workspace", "semantic_enabled", "semantic_version",
+                     "updated_at", "updated_by"} - columns
+                )
+                cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
+                present = {str(row[0]) for row in cur.fetchall()}
+                user = (_request_creds.get() or ("system", ""))[0]
+                added = []
+                for workspace in cls.discover_workspaces():
+                    if workspace in present:
+                        continue
+                    cur.execute(
+                        f"INSERT INTO {_WORKSPACE_METADATA_TABLE} "
+                        "(workspace, semantic_enabled, semantic_version, updated_at, updated_by) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (workspace, True, 1, datetime.now(), user),
+                    )
+                    added.append(workspace)
+        finally:
+            conn.close()
+
+        cls._schema_state = None
+        if missing_columns:
+            raise SchemaMigrationRequired(
+                "Metadata table is missing columns: " + ", ".join(missing_columns)
+            )
+        logger.info("Metadata schema migrated; backfilled rows: %s", added or "none")
+        return {"created": True, "backfilled": added}
+
     def _require_write(self) -> None:
         """Reject mutations unless the current request may provision storage.
 
@@ -783,6 +890,15 @@ class DorisStore:
                 f"Workspace '{self._workspace}' storage is read-only for this request; "
                 "mutations require a Doris administrator"
             )
+        cls = type(self)
+        if cls._schema_state is None:
+            cls._schema_state = cls.metadata_schema_status()["state"]
+        if cls._schema_state in ("needs_migration", "outdated"):
+            raise SchemaMigrationRequired(
+                "Semantic metadata storage needs migration: open the Semantic "
+                "Web UI as an admin and run 'Migrate metadata'. Writes are blocked "
+                "until it succeeds."
+            )
 
     def _ensure_tables(self) -> None:
         # Ordinary users hold SELECT but not CREATE. This runs from read paths
@@ -791,6 +907,14 @@ class DorisStore:
         # CREATE that fails with Access denied.
         if not provisioning_allowed():
             return
+        cls = type(self)
+        if cls._schema_state is None:
+            cls._schema_state = cls.metadata_schema_status()["state"]
+        if cls._schema_state in ("needs_migration", "outdated"):
+            raise SchemaMigrationRequired(
+                "Semantic metadata storage needs migration: open the Semantic Web UI "
+                "as an admin and run 'Migrate metadata'."
+            )
         key = self._workspace
         if self._table_cache.get(key):
             return
@@ -831,6 +955,7 @@ class DorisStore:
                 """)
                 self._get_workspace_metadata_with_cursor(cur)
             self._table_cache[key] = True
+            cls._schema_state = "ok"
             logger.info(f"Tables ensured for workspace '{self._workspace}': {self._active_table}, {self._staging_table}")
         except Exception as e:
             self._table_cache.pop(key, None)
