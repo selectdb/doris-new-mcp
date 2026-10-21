@@ -519,9 +519,17 @@ def create_server(
         return (request.query_params.get("workspace", "") or "example").strip()
 
     def _get_store(workspace: str) -> DorisStore:
-        """Get or create a DorisStore for the given workspace."""
+        """Get or create a DorisStore for the given workspace.
+
+        Store table names are built from the workspace, so an invalid name is a
+        client error (400), not a 500 from the exception bubbling out.
+        """
+        from starlette.exceptions import HTTPException as _HTTPException
         from store.store import DorisStore as _DS
-        return _DS(workspace=workspace)
+        try:
+            return _DS(workspace=workspace)
+        except ValueError as exc:
+            raise _HTTPException(status_code=400, detail=str(exc)) from exc
 
     from starlette.datastructures import UploadFile as _UploadFile
 
