@@ -316,17 +316,18 @@ class SchemaMigrationTest(unittest.TestCase):
         self.assertEqual(status["state"], "outdated")
         self.assertIn("updated_by", status["missing_columns"])
 
-    def test_writes_blocked_until_migrated(self):
+    def test_admin_writes_auto_provision_despite_stale_state(self):
+        """Migration is not a precondition for admin writes: they create the
+        table/row themselves (migration stays useful for bulk backfill)."""
         st.DorisStore._schema_state = "needs_migration"
-        st.set_provisioning_allowed(False)     # read-only construction is allowed
-        store = st.DorisStore(workspace="legacy")
-        st.set_provisioning_allowed(True)      # admin write is blocked
-        with self.assertRaises(SchemaMigrationRequired):
-            store.staging_commit()
-        with patch("store.store.pymysql.connect") as connect:
-            with self.assertRaises(SchemaMigrationRequired):
-                st.DorisStore(workspace="legacy2")   # constructor must not migrate
-        connect.assert_not_called()
+        cursor = self._mock_conn(columns=[], rows=[], schema_exists=True)
+        cursor.fetchone.return_value = None
+        store = st.DorisStore(workspace="legacy")   # admin construction provisions
+        store.bump_semantic_version()               # must not raise
+        sql = _sql(cursor)
+        self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
+        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
+        self.assertEqual(st.DorisStore._schema_state, "ok")
 
     def test_migration_creates_and_backfills(self):
         cursor = self._mock_conn(

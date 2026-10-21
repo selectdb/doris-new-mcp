@@ -919,15 +919,6 @@ class DorisStore:
                 f"Workspace '{self._workspace}' storage is read-only for this request; "
                 "mutations require a Doris administrator"
             )
-        cls = type(self)
-        if cls._schema_state is None:
-            cls._schema_state = cls.metadata_schema_status()["state"]
-        if cls._schema_state in ("needs_migration", "outdated"):
-            raise SchemaMigrationRequired(
-                "Semantic metadata storage needs migration: open the Semantic "
-                "Web UI as an admin and run 'Migrate metadata'. Writes are blocked "
-                "until it succeeds."
-            )
 
     @staticmethod
     def _grant_metadata_read(cur) -> None:
@@ -946,14 +937,6 @@ class DorisStore:
         # CREATE that fails with Access denied.
         if not provisioning_allowed():
             return
-        cls = type(self)
-        if cls._schema_state is None:
-            cls._schema_state = cls.metadata_schema_status()["state"]
-        if cls._schema_state in ("needs_migration", "outdated"):
-            raise SchemaMigrationRequired(
-                "Semantic metadata storage needs migration: open the Semantic Web UI "
-                "as an admin and run 'Migrate metadata'."
-            )
         key = self._workspace
         if self._table_cache.get(key):
             return
@@ -995,7 +978,7 @@ class DorisStore:
                 self._get_workspace_metadata_with_cursor(cur)
                 self._grant_metadata_read(cur)
             self._table_cache[key] = True
-            cls._schema_state = "ok"
+            type(self)._schema_state = "ok"
             logger.info(f"Tables ensured for workspace '{self._workspace}': {self._active_table}, {self._staging_table}")
         except Exception as e:
             self._table_cache.pop(key, None)

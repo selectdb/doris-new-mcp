@@ -1613,7 +1613,7 @@ def create_server(
                     + (": missing columns " + ", ".join(schema["missing_columns"])
                        if schema["missing_columns"] else
                        " (database exists but workspace_metadata is missing)")
-                    + ". Writes are blocked until it succeeds."
+                    + ". Run it to create/backfill the storage (admin writes also do this)."
                 )
                 action = ('<button class="btn btn-sm btn-primary" onclick="migrateMetadata()">'
                           'Migrate metadata</button><span id="migrate-result" style="margin-left:8px;"></span>')

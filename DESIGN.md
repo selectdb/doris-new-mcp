@@ -275,8 +275,8 @@ system_mcp.workspace_metadata           ← workspace 级运行状态
 Server 节点共享同一开关和发布版本，不依赖单机配置或本地缓存。
 
 **旧存储的迁移：** 元数据表缺失（旧部署/手工建表）或缺少字段时，Semantic Web UI
-会在模型页显示迁移横幅，只有 admin 能点 “Migrate metadata”。迁移成功前所有写操作
-返回 409 / `SchemaMigrationRequired`。迁移会建表并按 `active_store_*` 回填缺失行；
+会在模型页显示迁移横幅，只有 admin 能点 “Migrate metadata”。迁移不阻断写操作：
+admin 的写会自动建表补行，迁移按钮用于一次性补齐。迁移会建表并按 `active_store_*` 回填缺失行；
 若表已存在但缺字段，迁移会报出缺列清单，需人工处理（不自动改表结构）。
 元数据表缺失时，读取按默认值（enabled=1、version=1）继续，普通用户仍可查询语义层；
 写操作仍保持阻断，直到迁移完成。
