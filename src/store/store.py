@@ -216,6 +216,19 @@ class _GuardedConnection:
         return self._conn.__exit__(*exc)
 
 
+def _is_missing_schema_error(exc: Exception) -> bool:
+    """True when the error means "database/table does not exist"."""
+    args = getattr(exc, "args", ())
+    code = args[0] if args and isinstance(args[0], int) else None
+    message = str(exc).lower()
+    return (
+        code in (1049, 1146)
+        or "unknown database" in message
+        or "unknown table" in message
+        or "doesn't exist" in message
+    )
+
+
 def _get_conn() -> Any:
     creds = _request_creds.get()
     if creds is None:
@@ -435,12 +448,27 @@ class DorisStore:
         )
 
     def get_workspace_metadata(self) -> WorkspaceMetadata:
+        """Read the workspace control state, tolerating absent storage.
+
+        If workspace_metadata (or the whole database) does not exist, models can
+        still be loaded: enabled/version fall back to their defaults. Ordinary
+        users can therefore query the semantic layer even before an admin has
+        created the metadata table.
+        """
         self._ensure_tables()
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"USE {_DORIS_DB}")
                 return self._get_workspace_metadata_with_cursor(cur, create_missing=False)
+        except Exception as exc:
+            if _is_missing_schema_error(exc):
+                logger.info(
+                    "Workspace '%s': metadata storage missing (%s); using defaults",
+                    self._workspace, exc,
+                )
+                return self._default_metadata()
+            raise
         finally:
             conn.close()
 

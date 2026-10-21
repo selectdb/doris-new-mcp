@@ -109,6 +109,23 @@ class StorageProvisioningTest(unittest.TestCase):
         ])
         self.assertEqual(st.DorisStore.discover_workspaces(), ["ok"])
 
+    def test_missing_metadata_table_still_reads_defaults(self):
+        """No workspace_metadata table: loading must continue with defaults so
+        ordinary users can query models before an admin creates it."""
+        cursor = self._conn(database_exists=True)
+        cursor.execute.side_effect = RuntimeError("Unknown table 'workspace_metadata'")
+        meta = st.DorisStore(workspace="no_meta").get_workspace_metadata()
+
+        self.assertTrue(meta.semantic_enabled)
+        self.assertEqual(meta.semantic_version, 1)
+        self.assertNotIn("INSERT", _sql(cursor))
+
+    def test_other_metadata_errors_still_raise(self):
+        cursor = self._conn(database_exists=True)
+        cursor.execute.side_effect = RuntimeError("connection reset")
+        with self.assertRaises(RuntimeError):
+            st.DorisStore(workspace="broken").get_workspace_metadata()
+
     # ── metadata reads never INSERT (legacy workspaces have no row) ──
 
     def test_metadata_read_without_row_does_not_insert(self):
