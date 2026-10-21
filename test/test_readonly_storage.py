@@ -379,17 +379,21 @@ class SchemaMigrationTest(unittest.TestCase):
                      "CREATE TABLE IF NOT EXISTS", "DELETE FROM", "UPDATE "):
             self.assertNotIn(verb, sql)
 
-    def test_migration_reports_duplicate_rows(self):
+    def test_duplicate_rows_are_left_untouched(self):
+        """Duplicated workspaces keep their rows; missing ones are still added."""
         self._columns(self.FULL)
-        cursor = self._mock_conn(fetchall=[("ws",)])
-        with patch.object(st.DorisStore, "discover_workspaces", return_value=["ws"]):
-            with self.assertRaises(SchemaMigrationRequired) as ctx:
-                st.DorisStore.migrate_metadata_schema()
-        self.assertIn("duplicate metadata rows", str(ctx.exception))
+        cursor = self._mock_conn()
+        cursor.fetchall.side_effect = [[("dup",)], [("dup",)]]
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=["dup", "new"]):
+            result = st.DorisStore.migrate_metadata_schema()
+
+        self.assertEqual(result["duplicates"], ["dup"])
+        self.assertEqual(result["backfilled"], ["new"])
         sql = _sql(cursor)
-        for verb in ("ALTER TABLE", "INSERT INTO", "GRANT SELECT_PRIV",
-                     "CREATE TABLE IF NOT EXISTS", "DELETE FROM", "UPDATE "):
-            self.assertNotIn(verb, sql)
+        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
+        self.assertIn("GRANT SELECT_PRIV", sql)
+        self.assertNotIn("DELETE FROM", sql)
+        self.assertNotIn("UPDATE ", sql)
 
     def test_migration_requires_admin(self):
         st.set_provisioning_allowed(False)

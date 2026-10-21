@@ -891,6 +891,8 @@ class DorisStore:
         added_columns: list[str] = []
         backfilled: list[str] = []
         skipped: list[str] = []
+        duplicates: list[str] = []
+        warnings: list[str] = []
         problems: list[str] = []
 
         def abort_if_problems() -> None:
@@ -929,7 +931,7 @@ class DorisStore:
                         row = cur.fetchone()
                         ddl = str(row[1]).upper() if row and len(row) > 1 else ""
                         if ddl and ("UNIQUE KEY" not in ddl or "WORKSPACE" not in ddl):
-                            problems.append("table is not UNIQUE KEY(workspace)")
+                            warnings.append("table is not UNIQUE KEY(workspace)")
                     except Exception:
                         logger.warning("Key-model check skipped (SHOW CREATE failed)")
 
@@ -938,11 +940,13 @@ class DorisStore:
                             f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE} "
                             "GROUP BY workspace HAVING COUNT(*) > 1"
                         )
-                        duplicates = [str(r[0]) for r in cur.fetchall()]
+                        duplicates = sorted(str(r[0]) for r in cur.fetchall())
                         if duplicates:
-                            problems.append(
-                                "duplicate metadata rows for: "
-                                + ", ".join(sorted(duplicates))
+                            # Leave duplicated workspaces untouched: they already
+                            # have rows, and rewriting them is not safe.
+                            warnings.append(
+                                "duplicate rows left untouched for: "
+                                + ", ".join(duplicates)
                             )
                     except Exception:
                         logger.warning("Duplicate check skipped (query unsupported)")
@@ -1000,11 +1004,14 @@ class DorisStore:
 
         cls._schema_state = None
         logger.info(
-            "Metadata schema migrated; added columns: %s, backfilled: %s, skipped: %s",
+            "Metadata schema migrated; added columns: %s, backfilled: %s, "
+            "skipped: %s, duplicates left: %s",
             added_columns or "none", backfilled or "none", skipped or "none",
+            duplicates or "none",
         )
         return {"created": True, "added_columns": added_columns,
-                "backfilled": backfilled, "skipped": skipped}
+                "backfilled": backfilled, "skipped": skipped,
+                "duplicates": duplicates, "warnings": warnings}
 
     def _require_write(self) -> None:
         """Reject mutations unless the current request may provision storage.
