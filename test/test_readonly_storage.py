@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 import sys
 import unittest
+
+import sqlglot
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -298,6 +300,19 @@ class SchemaMigrationTest(unittest.TestCase):
         connect.return_value = conn
         return cursor
 
+    def _assert_doris_parses(self, cursor):
+        """Every generated statement must at least parse under the Doris dialect."""
+        for call in cursor.execute.call_args_list:
+            sql = str(call.args[0]).strip()
+            if not sql:
+                continue
+            # pymysql substitutes %s before sending; parse the concrete form.
+            sql = re.sub(r"%s", "NULL", sql, flags=re.IGNORECASE)
+            try:
+                sqlglot.parse_one(sql, read="doris")
+            except Exception as exc:  # pragma: no cover - failure path
+                self.fail(f"unparseable SQL: {sql[:100]} -> {exc}")
+
     def _columns(self, columns, side_effect=None):
         patcher = patch.object(
             st.DorisStore, "_metadata_columns_with_cursor",
@@ -349,6 +364,7 @@ class SchemaMigrationTest(unittest.TestCase):
         sql = _sql(cursor)
         self.assertIn("SYSTEM_MCP.WORKSPACE_METADATA", sql)
         self.assertNotIn("FROM WORKSPACE_METADATA", sql)
+        self._assert_doris_parses(cursor)
 
     def test_read_path_metadata_query_is_qualified(self):
         st.set_provisioning_allowed(False)
@@ -368,6 +384,7 @@ class SchemaMigrationTest(unittest.TestCase):
         self.assertIn("INSERT INTO SYSTEM_MCP.WORKSPACE_METADATA", sql)
         self.assertIn("GRANT SELECT_PRIV", sql)
         self.assertEqual(st.DorisStore._schema_state, None)
+        self._assert_doris_parses(cursor)
 
     def test_migration_adds_missing_columns(self):
         self._columns({}, side_effect=[
@@ -381,6 +398,7 @@ class SchemaMigrationTest(unittest.TestCase):
         self.assertIn("ALTER TABLE SYSTEM_MCP.WORKSPACE_METADATA ADD COLUMN SEMANTIC_VERSION", sql)
         self.assertIn("ALTER TABLE SYSTEM_MCP.WORKSPACE_METADATA ADD COLUMN UPDATED_AT", sql)
         self.assertEqual(sorted(result["added_columns"]), ["semantic_version", "updated_at", "updated_by"])
+        self._assert_doris_parses(cursor)
 
     def test_migration_reports_unfixable_type(self):
         columns = dict(self.FULL, semantic_version="varchar")
