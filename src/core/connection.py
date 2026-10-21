@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import aiomysql
@@ -11,6 +12,27 @@ import aiomysql
 from config.loader import ClusterConfig
 
 logger = logging.getLogger("doris_new_mcp.connection")
+
+# The query pool is the one place tool SQL reaches Doris. Everything it runs is
+# supposed to be read-only already (sqlglot validation for execute_query,
+# validate_readonly for compiled metric SQL, fixed SHOW/DESCRIBE elsewhere);
+# this is the last-line backstop so a missed validation cannot become a write.
+_READ_ONLY_PREFIXES = {"SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN"}
+_STATEMENT_HEAD = re.compile(
+    r"^\s*(?:(?:--[^\n]*\n|#[^\n]*\n|/\*.*?\*/)\s*)*([A-Za-z]+)",
+    re.DOTALL,
+)
+
+
+def assert_read_only_statement(sql: str) -> None:
+    """Reject anything that is not a read statement, before it reaches Doris."""
+    match = _STATEMENT_HEAD.match(sql)
+    keyword = match.group(1).upper() if match else ""
+    if keyword not in _READ_ONLY_PREFIXES:
+        raise ValueError(
+            f"Only read-only SQL is allowed on the query pool (got "
+            f"{keyword or 'empty'} statement)"
+        )
 
 
 class ConnectionPool:
@@ -62,7 +84,8 @@ class ConnectionPool:
         max_rows: int | None = None,
         timeout: int | None = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Execute SQL and return (rows_as_dicts, column_names)."""
+        """Execute read-only SQL and return (rows_as_dicts, column_names)."""
+        assert_read_only_statement(sql)
         pool = await self._ensure_pool()
         _timeout = timeout or self._cluster.query_timeout
         _max_rows = max_rows or self._cluster.max_rows

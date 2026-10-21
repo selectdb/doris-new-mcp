@@ -367,6 +367,8 @@ class TestStoreOperationsWithCredentials(unittest.TestCase):
         which reads from contextvar."""
         import store.store as st
         st.set_request_credentials("admin", "seed_pass")
+        st.set_provisioning_allowed(True)   # seed() runs as admin (example deploy)
+        self.addCleanup(st.set_provisioning_allowed, False)
 
         with patch("store.store.pymysql.connect") as mock_connect:
             mock_conn = MagicMock()

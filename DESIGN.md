@@ -274,6 +274,14 @@ system_mcp.workspace_metadata           ← workspace 级运行状态
 `workspace_metadata` 与模型表放在同一个 `system_mcp` 管理库中，使所有 MCP
 Server 节点共享同一开关和发布版本，不依赖单机配置或本地缓存。
 
+**旧存储的迁移：** 元数据表缺失（旧部署/手工建表）或缺少字段时，Semantic Web UI
+会在模型页显示迁移横幅，只有 admin 能点 “Migrate metadata”。迁移不阻断写操作：
+admin 的写会自动建表补行，迁移按钮用于一次性补齐。迁移会建表并按 `active_store_*` 回填缺失行；
+若表已存在但缺字段，迁移会自动 `ADD COLUMN` 补齐可补的列；列类型不匹配时，迁移会在
+动数据前中止；重复行保持原样（不删、不改），其余缺行照常补齐，并在结果中列出重复项。
+元数据表缺失时，读取按默认值（enabled=1、version=1）继续，普通用户仍可查询语义层；
+写操作仍保持阻断，直到迁移完成。
+
 **存储初始化的权限边界：** 建库建表的 DDL 只对 admin 身份的请求执行——admin
 访问时若库/表缺失会自动补建，写操作（创建/删除工作区、提交 staging、部署 example）
 同样走这条路径。普通用户（通常只有 `SELECT_PRIV`）的读路径只做

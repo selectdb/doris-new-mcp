@@ -29,6 +29,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 
 import pymysql
@@ -66,6 +67,23 @@ _DORIS_HOST = "127.0.0.1"
 _DORIS_PORT = 9030
 _DORIS_DB = "system_mcp"
 _WORKSPACE_METADATA_TABLE = "workspace_metadata"
+
+# Required shape of the control table. Types are compared by information_schema
+# DATA_TYPE prefix (varchar/tinyint/bigint/datetime).
+_METADATA_REQUIRED = {
+    "workspace": "varchar",
+    "semantic_enabled": "tinyint",
+    "semantic_version": "bigint",
+    "updated_at": "datetime",
+    "updated_by": "varchar",
+}
+# Columns the migration can add. workspace is the key; it cannot be added.
+_METADATA_ADD_DDL = {
+    "semantic_enabled": 'TINYINT NOT NULL DEFAULT "1"',
+    "semantic_version": 'BIGINT NOT NULL DEFAULT "1"',
+    "updated_at": "DATETIME NULL",
+    "updated_by": "VARCHAR(256) NULL",
+}
 
 # Workspace names become table-name fragments (active_store_<ws>), so they must
 # be plain identifiers. Without this, a crafted "workspace" query parameter or
@@ -115,6 +133,20 @@ class SemanticStorageNotInitialized(RuntimeError):
     """Storage is missing and this caller may not create it."""
 
 
+class SchemaMigrationRequired(RuntimeError):
+    """The semantic metadata table is missing/outdated; writes are blocked
+    until an administrator runs the migration from the Semantic Web UI."""
+
+
+class WriteNotAllowed(RuntimeError):
+    """A mutating store method was reached from a read-only request.
+
+    Ordinary Doris users hold SELECT only, so any write on their behalf would
+    fail at Doris with "Access denied". Fail here instead, with a message that
+    points at the programming error rather than the caller's privileges.
+    """
+
+
 def set_doris_endpoint(host: str, port: int) -> None:
     """Update the Doris FE endpoint from server configuration."""
     global _DORIS_HOST, _DORIS_PORT
@@ -128,7 +160,94 @@ def set_doris_port(port: int) -> None:
     _DORIS_PORT = port
 
 
-def _get_conn() -> pymysql.Connection:
+_WRITE_STMT_RE = re.compile(
+    r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|TRUNCATE|RENAME|"
+    r"GRANT|REVOKE|LOAD|SET)\b",
+    re.IGNORECASE,
+)
+
+
+def _assert_statement_allowed(sql: str) -> None:
+    """Refuse write statements for callers that may only read.
+
+    This is the backstop for the recurring "read path performs a write" class
+    of bug: even if a read method forgets its guard, the statement never
+    reaches Doris with an ordinary user's credentials.
+    """
+    if not provisioning_allowed() and _WRITE_STMT_RE.match(str(sql)):
+        raise WriteNotAllowed(
+            "This request is read-only (ordinary Doris user): "
+            f"refusing to execute {str(sql).split()[0].upper()} on Doris"
+        )
+
+
+class _GuardedCursor:
+    """pymysql cursor proxy that blocks writes in read-only requests."""
+
+    def __init__(self, cursor: Any):
+        self._cursor = cursor
+
+    def execute(self, sql: Any, args: Any = None) -> Any:
+        _assert_statement_allowed(sql)
+        if args is None:
+            return self._cursor.execute(sql)
+        return self._cursor.execute(sql, args)
+
+    def executemany(self, sql: Any, args: Any) -> Any:
+        _assert_statement_allowed(sql)
+        return self._cursor.executemany(sql, args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __enter__(self):
+        # pymysql cursors return themselves here; honour whatever the wrapped
+        # cursor returns (tests replace it with a different object).
+        self._cursor = self._cursor.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._cursor.__exit__(*exc)
+
+
+class _GuardedConnection:
+    """pymysql connection proxy whose cursors enforce the read-only policy."""
+
+    def __init__(self, conn: Any):
+        self._conn = conn
+
+    def cursor(self, *args: Any, **kwargs: Any) -> _GuardedCursor:
+        return _GuardedCursor(self._conn.cursor(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+
+def _is_missing_schema_error(exc: Exception) -> bool:
+    """True when the error means "database/table does not exist"."""
+    args = getattr(exc, "args", ())
+    code = args[0] if args and isinstance(args[0], int) else None
+    message = str(exc).lower()
+    return (
+        code in (1049, 1054, 1146)
+        or "unknown database" in message
+        or "unknown table" in message
+        or "unknown column" in message
+        or "doesn't exist" in message
+    )
+
+
+def _get_conn() -> Any:
     creds = _request_creds.get()
     if creds is None:
         raise RuntimeError(
@@ -136,12 +255,12 @@ def _get_conn() -> pymysql.Connection:
             "Ensure the request carries a valid Bearer token or session cookie."
         )
     user, password = creds
-    return pymysql.connect(
+    return _GuardedConnection(pymysql.connect(
         host=_DORIS_HOST, port=_DORIS_PORT,
         user=user, password=password,
         charset="utf8mb4", autocommit=True,
         connect_timeout=5,
-    )
+    ))
 
 
 class DorisStore:
@@ -240,6 +359,10 @@ class DorisStore:
         Safe to call when tables don't exist (uses IF EXISTS).
         """
         workspace = _validate_workspace_name(workspace)
+        if not provisioning_allowed():
+            raise WriteNotAllowed(
+                "Dropping workspace storage requires a Doris administrator"
+            )
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
@@ -291,7 +414,15 @@ class DorisStore:
             updated_by=str(row[3]) if row[3] is not None else None,
         )
 
-    def _get_workspace_metadata_with_cursor(self, cur) -> WorkspaceMetadata:
+    def _get_workspace_metadata_with_cursor(
+        self, cur, create_missing: bool = True,
+    ) -> WorkspaceMetadata:
+        """Read one workspace's metadata row.
+
+        ``create_missing=False`` is used by read paths: a missing row (legacy or
+        externally created workspace) must not turn a SELECT into an INSERT,
+        because ordinary users have no INSERT privilege.
+        """
         cur.execute(
             f"SELECT semantic_enabled, semantic_version, updated_at, updated_by "
             f"FROM {_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
@@ -299,6 +430,9 @@ class DorisStore:
         )
         row = cur.fetchone()
         if row is None:
+            if not create_missing:
+                return self._default_metadata()
+            self._require_write()
             user = (_request_creds.get() or ("system", ""))[0]
             now = datetime.now()
             cur.execute(
@@ -316,17 +450,48 @@ class DorisStore:
             )
         return self._metadata_from_row(self._workspace, row)
 
+    def _default_metadata(self) -> WorkspaceMetadata:
+        """State assumed when a workspace has no published metadata row.
+
+        Older/externally created workspaces have tables but no row; they are
+        enabled with version 1 so the version check stays stable. The row is
+        created by the next admin write (toggle, commit, deploy).
+        """
+        return WorkspaceMetadata(
+            workspace=self._workspace,
+            semantic_enabled=True,
+            semantic_version=1,
+            updated_at=None,
+            updated_by=None,
+        )
+
     def get_workspace_metadata(self) -> WorkspaceMetadata:
+        """Read the workspace control state, tolerating absent storage.
+
+        If workspace_metadata (or the whole database) does not exist, models can
+        still be loaded: enabled/version fall back to their defaults. Ordinary
+        users can therefore query the semantic layer even before an admin has
+        created the metadata table.
+        """
         self._ensure_tables()
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"USE {_DORIS_DB}")
-                return self._get_workspace_metadata_with_cursor(cur)
+                return self._get_workspace_metadata_with_cursor(cur, create_missing=False)
+        except Exception as exc:
+            if _is_missing_schema_error(exc):
+                logger.info(
+                    "Workspace '%s': metadata storage missing (%s); using defaults",
+                    self._workspace, exc,
+                )
+                return self._default_metadata()
+            raise
         finally:
             conn.close()
 
     def set_semantic_enabled(self, enabled: bool, updated_by: str) -> WorkspaceMetadata:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -344,6 +509,7 @@ class DorisStore:
             conn.close()
 
     def bump_semantic_version(self, updated_by: str | None = None) -> WorkspaceMetadata:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -487,6 +653,7 @@ class DorisStore:
         ]
 
     def staging_upsert(self, filename: str, content: str) -> None:
+        self._require_write()
         self._ensure_tables()
         now = datetime.now()
         conn = _get_conn()
@@ -514,6 +681,7 @@ class DorisStore:
         - If file is in active_store → add 'delete' record to staging
         Returns 'removed', 'staged', or 'not_found'.
         """
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         now = datetime.now()
@@ -542,6 +710,7 @@ class DorisStore:
         return result
 
     def staging_discard(self) -> None:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -592,6 +761,7 @@ class DorisStore:
         return StoreState(revision=revision)
 
     def staging_commit(self) -> StoreState:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -653,6 +823,218 @@ class DorisStore:
 
     _table_cache: dict[str, bool] = {}
 
+    _schema_state: str | None = None
+
+    @classmethod
+    def _metadata_columns_with_cursor(cls, cur) -> dict[str, str]:
+        """Return {column_name: data_type} for workspace_metadata."""
+        cur.execute(
+            "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+            (_DORIS_DB, _WORKSPACE_METADATA_TABLE),
+        )
+        return {str(row[0]).lower(): str(row[1]).lower() for row in cur.fetchall()}
+
+    @classmethod
+    def metadata_schema_status(cls) -> dict:
+        """Inspect the metadata storage without writing.
+
+        state:
+          ok              table exists with all required columns/types
+          fresh           no storage database yet (nothing to migrate)
+          needs_migration database exists but the metadata table is absent
+          outdated        table exists but columns are missing or mistyped
+        ``missing_rows`` lists workspaces with tables but no metadata row.
+        """
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                columns = cls._metadata_columns_with_cursor(cur)
+                if not columns:
+                    cur.execute(
+                        "SELECT SCHEMA_NAME FROM information_schema.schemata "
+                        "WHERE SCHEMA_NAME = %s", (_DORIS_DB,),
+                    )
+                    state = "fresh" if cur.fetchone() is None else "needs_migration"
+                    return {"state": state, "ok": state == "fresh",
+                            "missing_columns": [], "mismatched_columns": [],
+                            "missing_rows": []}
+
+                missing = sorted(set(_METADATA_REQUIRED) - columns.keys())
+                mismatched = sorted(
+                    name for name, expected in _METADATA_REQUIRED.items()
+                    if name in columns and not columns[name].startswith(expected)
+                )
+                cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
+                present = {str(row[0]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+
+        missing_rows = [w for w in cls.discover_workspaces() if w not in present]
+        state = "outdated" if (missing or mismatched) else "ok"
+        return {"state": state, "ok": state == "ok",
+                "missing_columns": missing, "mismatched_columns": mismatched,
+                "missing_rows": missing_rows}
+
+    @classmethod
+    def migrate_metadata_schema(cls) -> dict:
+        """Bring workspace_metadata to the required shape, then backfill rows.
+
+        Safety rule: verify first, write second. If an existing table has
+        duplicates, a wrong key model, or an unfixable column type, the
+        migration aborts before ALTER/INSERT/GRANT and reports what a human
+        must look at. Only a table that passes verification is repaired.
+        """
+        if not provisioning_allowed():
+            raise WriteNotAllowed("Schema migration requires a Doris administrator")
+
+        added_columns: list[str] = []
+        backfilled: list[str] = []
+        skipped: list[str] = []
+        duplicates: list[str] = []
+        warnings: list[str] = []
+        problems: list[str] = []
+
+        def abort_if_problems() -> None:
+            if problems:
+                raise SchemaMigrationRequired(
+                    "Semantic metadata storage needs manual attention: "
+                    + "; ".join(problems)
+                )
+
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DORIS_DB}")
+                cur.execute(f"USE {_DORIS_DB}")
+
+                columns = cls._metadata_columns_with_cursor(cur)
+                existed = bool(columns)
+
+                if not existed:
+                    cur.execute(f"""\
+                        CREATE TABLE IF NOT EXISTS {_WORKSPACE_METADATA_TABLE} (
+                            workspace          VARCHAR(128) NOT NULL,
+                            semantic_enabled   TINYINT NOT NULL DEFAULT "1",
+                            semantic_version   BIGINT NOT NULL DEFAULT "1",
+                            updated_at         DATETIME NOT NULL,
+                            updated_by         VARCHAR(256) NULL
+                        ) UNIQUE KEY(workspace)
+                        DISTRIBUTED BY HASH(workspace) BUCKETS 1
+                        PROPERTIES ('replication_num' = '1')
+                    """)
+                    columns = cls._metadata_columns_with_cursor(cur)
+                else:
+                    # ---- verify before touching anything ----
+                    try:
+                        cur.execute(f"SHOW CREATE TABLE {_WORKSPACE_METADATA_TABLE}")
+                        row = cur.fetchone()
+                        ddl = str(row[1]).upper() if row and len(row) > 1 else ""
+                        if ddl and ("UNIQUE KEY" not in ddl or "WORKSPACE" not in ddl):
+                            warnings.append("table is not UNIQUE KEY(workspace)")
+                    except Exception:
+                        logger.warning("Key-model check skipped (SHOW CREATE failed)")
+
+                    try:
+                        cur.execute(
+                            f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE} "
+                            "GROUP BY workspace HAVING COUNT(*) > 1"
+                        )
+                        duplicates = sorted(str(r[0]) for r in cur.fetchall())
+                        if duplicates:
+                            # Leave duplicated workspaces untouched: they already
+                            # have rows, and rewriting them is not safe.
+                            warnings.append(
+                                "duplicate rows left untouched for: "
+                                + ", ".join(duplicates)
+                            )
+                    except Exception:
+                        logger.warning("Duplicate check skipped (query unsupported)")
+
+                    for name, expected in _METADATA_REQUIRED.items():
+                        if name in columns and not columns[name].startswith(expected):
+                            problems.append(
+                                f"column {name} has type {columns[name]}, "
+                                f"expected {expected}"
+                            )
+
+                    abort_if_problems()   # nothing has been written yet
+
+                    for name in sorted(set(_METADATA_ADD_DDL) &
+                                       (set(_METADATA_REQUIRED) - columns.keys())):
+                        try:
+                            cur.execute(
+                                f"ALTER TABLE {_WORKSPACE_METADATA_TABLE} "
+                                f"ADD COLUMN {name} {_METADATA_ADD_DDL[name]}"
+                            )
+                            added_columns.append(name)
+                        except Exception as exc:
+                            problems.append(f"cannot add column {name}: {exc}")
+
+                    if added_columns:
+                        columns = cls._metadata_columns_with_cursor(cur)
+                        for name in set(_METADATA_REQUIRED) - columns.keys():
+                            problems.append(f"missing column {name}")
+                        abort_if_problems()
+
+                # ---- verified: backfill + grant ----
+                cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
+                present = {str(r[0]) for r in cur.fetchall()}
+                user = (_request_creds.get() or ("system", ""))[0]
+                for workspace in cls.discover_workspaces():
+                    if workspace in present:
+                        continue
+                    try:
+                        cur.execute(
+                            f"INSERT INTO {_WORKSPACE_METADATA_TABLE} "
+                            "(workspace, semantic_enabled, semantic_version, updated_at, updated_by) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            (workspace, True, 1, datetime.now(), user),
+                        )
+                        backfilled.append(workspace)
+                    except Exception as exc:
+                        if "duplicate" in str(exc).lower():
+                            skipped.append(workspace)
+                        else:
+                            raise
+
+                cls._grant_metadata_read(cur)
+        finally:
+            conn.close()
+
+        cls._schema_state = None
+        logger.info(
+            "Metadata schema migrated; added columns: %s, backfilled: %s, "
+            "skipped: %s, duplicates left: %s",
+            added_columns or "none", backfilled or "none", skipped or "none",
+            duplicates or "none",
+        )
+        return {"created": True, "added_columns": added_columns,
+                "backfilled": backfilled, "skipped": skipped,
+                "duplicates": duplicates, "warnings": warnings}
+
+    def _require_write(self) -> None:
+        """Reject mutations unless the current request may provision storage.
+
+        Only admin requests set the flag. Reads must never reach this: if they
+        do, it is a bug in the caller, not a permission problem for the user.
+        """
+        if not provisioning_allowed():
+            raise WriteNotAllowed(
+                f"Workspace '{self._workspace}' storage is read-only for this request; "
+                "mutations require a Doris administrator"
+            )
+
+    @staticmethod
+    def _grant_metadata_read(cur) -> None:
+        """Make the semantic storage readable for all users.
+
+        Runs as an admin statement; without it a freshly created
+        workspace_metadata table is invisible to ordinary users, and their
+        first semantic read fails with Access denied.
+        """
+        cur.execute(f"GRANT SELECT_PRIV ON `{_DORIS_DB}`.* TO '%'")
+
     def _ensure_tables(self) -> None:
         # Ordinary users hold SELECT but not CREATE. This runs from read paths
         # too (DorisStore construction, metadata reads), so it must be a no-op
@@ -699,7 +1081,9 @@ class DorisStore:
                     PROPERTIES ('replication_num' = '1')
                 """)
                 self._get_workspace_metadata_with_cursor(cur)
+                self._grant_metadata_read(cur)
             self._table_cache[key] = True
+            type(self)._schema_state = "ok"
             logger.info(f"Tables ensured for workspace '{self._workspace}': {self._active_table}, {self._staging_table}")
         except Exception as e:
             self._table_cache.pop(key, None)
