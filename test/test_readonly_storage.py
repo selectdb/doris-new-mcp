@@ -82,6 +82,38 @@ class StorageProvisioningTest(unittest.TestCase):
         self.assertEqual(st.DorisStore.discover_workspaces(), [])
         self.assertIn("CREATE DATABASE IF NOT EXISTS SYSTEM_MCP", _sql(cursor))
 
+    # ── workspace names are identifiers, never SQL fragments ──
+
+    def test_invalid_workspace_name_is_rejected_before_sql(self):
+        with patch("store.store.pymysql.connect") as connect:
+            with self.assertRaises(ValueError):
+                st.DorisStore(workspace="x UNION SELECT 1,2,3 -- ")
+        connect.assert_not_called()
+
+    def test_drop_workspace_tables_rejects_invalid_name(self):
+        with patch("store.store.pymysql.connect") as connect:
+            with self.assertRaises(ValueError):
+                st.DorisStore.drop_workspace_tables("x, dw.users")
+        connect.assert_not_called()
+
+    def test_discovery_ignores_invalid_workspace_tables(self):
+        self._conn(database_exists=True, tables=[
+            ("active_store_ok",), ("active_store_bad-name",),
+        ])
+        self.assertEqual(st.DorisStore.discover_workspaces(), ["ok"])
+
+    # ── the admin example-deploy path may still provision ──
+
+    def test_admin_deploy_path_provisions_missing_metadata_table(self):
+        """Example deployment runs as admin in a background task on a fresh
+        install: bump_semantic_version() must be able to create the metadata
+        table, otherwise deploy fails with "Unknown table"."""
+        st.set_provisioning_allowed(True)
+        cursor = self._conn(database_exists=True)
+        cursor.fetchone.return_value = None   # no metadata row yet
+        st.DorisStore(workspace="deploy_ws").bump_semantic_version()
+        self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", _sql(cursor))
+
     # ── read helpers stay DDL-free for normal users ──
 
     def test_normal_user_reads_never_create_tables(self):

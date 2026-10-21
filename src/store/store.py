@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,20 @@ _DORIS_HOST = "127.0.0.1"
 _DORIS_PORT = 9030
 _DORIS_DB = "system_mcp"
 _WORKSPACE_METADATA_TABLE = "workspace_metadata"
+
+# Workspace names become table-name fragments (active_store_<ws>), so they must
+# be plain identifiers. Without this, a crafted "workspace" query parameter or
+# request field could inject SQL into every store statement.
+_WORKSPACE_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
+
+
+def _validate_workspace_name(workspace: str) -> str:
+    if not isinstance(workspace, str) or not _WORKSPACE_NAME_RE.fullmatch(workspace):
+        raise ValueError(
+            "Workspace name must start with a letter and contain only letters, "
+            "digits and underscores"
+        )
+    return workspace
 
 # Request-scoped credential override. Set once at the start of each
 # authenticated request, read by _get_conn(). Destroyed when the
@@ -138,7 +153,7 @@ class DorisStore:
     """
 
     def __init__(self, workspace: str = "example") -> None:
-        self._workspace = workspace
+        self._workspace = _validate_workspace_name(workspace)
         self._active_table = f"active_store_{workspace}"
         self._staging_table = f"staging_store_{workspace}"
         self._ensure_tables()
@@ -195,7 +210,16 @@ class DorisStore:
                 tables = [r[0] for r in cur.fetchall()]
         finally:
             conn.close()
-        return [t[len("active_store_"):] for t in tables]
+        names = []
+        for table in tables:
+            if not table.startswith("active_store_"):
+                continue
+            name = table[len("active_store_"):]
+            if _WORKSPACE_NAME_RE.fullmatch(name):
+                names.append(name)
+            else:
+                logger.warning("Ignoring workspace table with invalid name: %r", table)
+        return names
 
     @staticmethod
     def _database_exists(cur) -> bool:
@@ -215,6 +239,7 @@ class DorisStore:
 
         Safe to call when tables don't exist (uses IF EXISTS).
         """
+        workspace = _validate_workspace_name(workspace)
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
