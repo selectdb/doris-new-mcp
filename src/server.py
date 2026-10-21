@@ -332,9 +332,15 @@ def create_server(
         """Deploy example data/models with verified Admin credentials."""
         nonlocal _watcher_initialized
         from store.seed import seed_all, set_doris_port as seed_set_port
-        from store.store import set_request_credentials as _set_creds
+        from store.store import (
+            set_provisioning_allowed as _allow_provisioning,
+            set_request_credentials as _set_creds,
+        )
 
         async with _example_lock:
+            # This path is reachable only through the admin WebUI cookie check;
+            # seed()/bump_semantic_version() need DDL rights (fresh installs).
+            _allow_provisioning(True)
             _set_creds(user, password)
             seed_set_port(cc.fe_mysql_port)
             performed = await asyncio.to_thread(seed_all)
@@ -360,9 +366,14 @@ def create_server(
     async def _delete_example(user: str, password: str) -> None:
         """Delete example deployment and detach it from the global router."""
         from store.seed import delete_example
-        from store.store import DorisStore, set_request_credentials as _set_creds
+        from store.store import (
+            DorisStore,
+            set_provisioning_allowed as _allow_provisioning,
+            set_request_credentials as _set_creds,
+        )
 
         async with _example_lock:
+            _allow_provisioning(True)
             _set_creds(user, password)
             await asyncio.to_thread(delete_example)
             multi_watcher._workspaces.pop("example", None)
