@@ -369,7 +369,7 @@ class DorisStore:
                 cur.execute(f"USE {_DORIS_DB}")
                 try:
                     cur.execute(
-                        f"DELETE FROM {_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
+                        f"DELETE FROM {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
                         (workspace,),
                     )
                 except Exception:
@@ -425,7 +425,7 @@ class DorisStore:
         """
         cur.execute(
             f"SELECT semantic_enabled, semantic_version, updated_at, updated_by "
-            f"FROM {_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
+            f"FROM {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
             (self._workspace,),
         )
         row = cur.fetchone()
@@ -436,7 +436,7 @@ class DorisStore:
             user = (_request_creds.get() or ("system", ""))[0]
             now = datetime.now()
             cur.execute(
-                f"INSERT INTO {_WORKSPACE_METADATA_TABLE} "
+                f"INSERT INTO {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} "
                 "(workspace, semantic_enabled, semantic_version, updated_at, updated_by) "
                 "VALUES (%s, %s, %s, %s, %s)",
                 (self._workspace, True, 1, now, user),
@@ -499,7 +499,7 @@ class DorisStore:
                 cur.execute(f"USE {_DORIS_DB}")
                 self._get_workspace_metadata_with_cursor(cur)
                 cur.execute(
-                    f"UPDATE {_WORKSPACE_METADATA_TABLE} "
+                    f"UPDATE {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} "
                     "SET semantic_enabled = %s, updated_at = %s, updated_by = %s "
                     "WHERE workspace = %s",
                     (enabled, datetime.now(), updated_by, self._workspace),
@@ -518,7 +518,7 @@ class DorisStore:
                 self._get_workspace_metadata_with_cursor(cur)
                 user = updated_by or (_request_creds.get() or ("system", ""))[0]
                 cur.execute(
-                    f"UPDATE {_WORKSPACE_METADATA_TABLE} "
+                    f"UPDATE {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} "
                     "SET semantic_version = semantic_version + 1, "
                     "updated_at = %s, updated_by = %s WHERE workspace = %s",
                     (datetime.now(), user, self._workspace),
@@ -800,7 +800,7 @@ class DorisStore:
                 self._get_workspace_metadata_with_cursor(cur)
                 user = (_request_creds.get() or ("system", ""))[0]
                 cur.execute(
-                    f"UPDATE {_WORKSPACE_METADATA_TABLE} "
+                    f"UPDATE {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} "
                     "SET semantic_version = semantic_version + 1, "
                     "updated_at = %s, updated_by = %s WHERE workspace = %s",
                     (datetime.now(), user, self._workspace),
@@ -865,7 +865,7 @@ class DorisStore:
                     name for name, expected in _METADATA_REQUIRED.items()
                     if name in columns and not columns[name].startswith(expected)
                 )
-                cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
+                cur.execute(f"SELECT workspace FROM {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE}")
                 present = {str(row[0]) for row in cur.fetchall()}
         finally:
             conn.close()
@@ -927,7 +927,7 @@ class DorisStore:
                 else:
                     # ---- verify before touching anything ----
                     try:
-                        cur.execute(f"SHOW CREATE TABLE {_WORKSPACE_METADATA_TABLE}")
+                        cur.execute(f"SHOW CREATE TABLE {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE}")
                         row = cur.fetchone()
                         ddl = str(row[1]).upper() if row and len(row) > 1 else ""
                         if ddl and ("UNIQUE KEY" not in ddl or "WORKSPACE" not in ddl):
@@ -937,7 +937,7 @@ class DorisStore:
 
                     try:
                         cur.execute(
-                            f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE} "
+                            f"SELECT workspace FROM {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} "
                             "GROUP BY workspace HAVING COUNT(*) > 1"
                         )
                         duplicates = sorted(str(r[0]) for r in cur.fetchall())
@@ -964,7 +964,7 @@ class DorisStore:
                                        (set(_METADATA_REQUIRED) - columns.keys())):
                         try:
                             cur.execute(
-                                f"ALTER TABLE {_WORKSPACE_METADATA_TABLE} "
+                                f"ALTER TABLE {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} "
                                 f"ADD COLUMN {name} {_METADATA_ADD_DDL[name]}"
                             )
                             added_columns.append(name)
@@ -978,7 +978,7 @@ class DorisStore:
                         abort_if_problems()
 
                 # ---- verified: backfill + grant ----
-                cur.execute(f"SELECT workspace FROM {_WORKSPACE_METADATA_TABLE}")
+                cur.execute(f"SELECT workspace FROM {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE}")
                 present = {str(r[0]) for r in cur.fetchall()}
                 user = (_request_creds.get() or ("system", ""))[0]
                 for workspace in cls.discover_workspaces():
@@ -986,7 +986,7 @@ class DorisStore:
                         continue
                     try:
                         cur.execute(
-                            f"INSERT INTO {_WORKSPACE_METADATA_TABLE} "
+                            f"INSERT INTO {_DORIS_DB}.{_WORKSPACE_METADATA_TABLE} "
                             "(workspace, semantic_enabled, semantic_version, updated_at, updated_by) "
                             "VALUES (%s, %s, %s, %s, %s)",
                             (workspace, True, 1, datetime.now(), user),

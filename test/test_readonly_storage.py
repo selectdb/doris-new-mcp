@@ -155,7 +155,7 @@ class StorageProvisioningTest(unittest.TestCase):
         sql = _sql(cursor)
         self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
         # Write path still creates the row when it is missing.
-        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
+        self.assertIn("INSERT INTO SYSTEM_MCP.WORKSPACE_METADATA", sql)
         self.assertIn("GRANT SELECT_PRIV", sql)
 
     # ── read helpers stay DDL-free for normal users ──
@@ -339,6 +339,23 @@ class SchemaMigrationTest(unittest.TestCase):
         self.assertEqual(status["state"], "outdated")
         self.assertEqual(status["mismatched_columns"], ["semantic_version"])
 
+    def test_metadata_queries_are_database_qualified(self):
+        """No USE statement is issued by the status probe, so every metadata
+        query must name the database explicitly."""
+        self._columns(self.FULL)
+        cursor = self._mock_conn(fetchall=[])
+        with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
+            st.DorisStore.metadata_schema_status()
+        sql = _sql(cursor)
+        self.assertIn("SYSTEM_MCP.WORKSPACE_METADATA", sql)
+        self.assertNotIn("FROM WORKSPACE_METADATA", sql)
+
+    def test_read_path_metadata_query_is_qualified(self):
+        st.set_provisioning_allowed(False)
+        cursor = self._mock_conn(fetchone=None)
+        st.DorisStore(workspace="ws").get_workspace_metadata()
+        self.assertIn("SYSTEM_MCP.WORKSPACE_METADATA", _sql(cursor))
+
     # ── migration ──
 
     def test_migration_creates_backfills_and_grants(self):
@@ -348,7 +365,7 @@ class SchemaMigrationTest(unittest.TestCase):
             result = st.DorisStore.migrate_metadata_schema()
         self.assertEqual(result["backfilled"], ["legacy"])
         sql = _sql(cursor)
-        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
+        self.assertIn("INSERT INTO SYSTEM_MCP.WORKSPACE_METADATA", sql)
         self.assertIn("GRANT SELECT_PRIV", sql)
         self.assertEqual(st.DorisStore._schema_state, None)
 
@@ -361,8 +378,8 @@ class SchemaMigrationTest(unittest.TestCase):
         with patch.object(st.DorisStore, "discover_workspaces", return_value=[]):
             result = st.DorisStore.migrate_metadata_schema()
         sql = _sql(cursor)
-        self.assertIn("ALTER TABLE WORKSPACE_METADATA ADD COLUMN SEMANTIC_VERSION", sql)
-        self.assertIn("ALTER TABLE WORKSPACE_METADATA ADD COLUMN UPDATED_AT", sql)
+        self.assertIn("ALTER TABLE SYSTEM_MCP.WORKSPACE_METADATA ADD COLUMN SEMANTIC_VERSION", sql)
+        self.assertIn("ALTER TABLE SYSTEM_MCP.WORKSPACE_METADATA ADD COLUMN UPDATED_AT", sql)
         self.assertEqual(sorted(result["added_columns"]), ["semantic_version", "updated_at", "updated_by"])
 
     def test_migration_reports_unfixable_type(self):
@@ -390,7 +407,7 @@ class SchemaMigrationTest(unittest.TestCase):
         self.assertEqual(result["duplicates"], ["dup"])
         self.assertEqual(result["backfilled"], ["new"])
         sql = _sql(cursor)
-        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
+        self.assertIn("INSERT INTO SYSTEM_MCP.WORKSPACE_METADATA", sql)
         self.assertIn("GRANT SELECT_PRIV", sql)
         self.assertNotIn("DELETE FROM", sql)
         self.assertNotIn("UPDATE ", sql)
