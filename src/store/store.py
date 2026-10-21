@@ -29,6 +29,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 
 import pymysql
@@ -137,7 +138,80 @@ def set_doris_port(port: int) -> None:
     _DORIS_PORT = port
 
 
-def _get_conn() -> pymysql.Connection:
+_WRITE_STMT_RE = re.compile(
+    r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|TRUNCATE|RENAME|"
+    r"GRANT|REVOKE|LOAD|SET)\b",
+    re.IGNORECASE,
+)
+
+
+def _assert_statement_allowed(sql: str) -> None:
+    """Refuse write statements for callers that may only read.
+
+    This is the backstop for the recurring "read path performs a write" class
+    of bug: even if a read method forgets its guard, the statement never
+    reaches Doris with an ordinary user's credentials.
+    """
+    if not provisioning_allowed() and _WRITE_STMT_RE.match(str(sql)):
+        raise WriteNotAllowed(
+            "This request is read-only (ordinary Doris user): "
+            f"refusing to execute {str(sql).split()[0].upper()} on Doris"
+        )
+
+
+class _GuardedCursor:
+    """pymysql cursor proxy that blocks writes in read-only requests."""
+
+    def __init__(self, cursor: Any):
+        self._cursor = cursor
+
+    def execute(self, sql: Any, args: Any = None) -> Any:
+        _assert_statement_allowed(sql)
+        if args is None:
+            return self._cursor.execute(sql)
+        return self._cursor.execute(sql, args)
+
+    def executemany(self, sql: Any, args: Any) -> Any:
+        _assert_statement_allowed(sql)
+        return self._cursor.executemany(sql, args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __enter__(self):
+        # pymysql cursors return themselves here; honour whatever the wrapped
+        # cursor returns (tests replace it with a different object).
+        self._cursor = self._cursor.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._cursor.__exit__(*exc)
+
+
+class _GuardedConnection:
+    """pymysql connection proxy whose cursors enforce the read-only policy."""
+
+    def __init__(self, conn: Any):
+        self._conn = conn
+
+    def cursor(self, *args: Any, **kwargs: Any) -> _GuardedCursor:
+        return _GuardedCursor(self._conn.cursor(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+
+def _get_conn() -> Any:
     creds = _request_creds.get()
     if creds is None:
         raise RuntimeError(
@@ -145,12 +219,12 @@ def _get_conn() -> pymysql.Connection:
             "Ensure the request carries a valid Bearer token or session cookie."
         )
     user, password = creds
-    return pymysql.connect(
+    return _GuardedConnection(pymysql.connect(
         host=_DORIS_HOST, port=_DORIS_PORT,
         user=user, password=password,
         charset="utf8mb4", autocommit=True,
         connect_timeout=5,
-    )
+    ))
 
 
 class DorisStore:

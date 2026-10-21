@@ -17,6 +17,11 @@ from store.bootstrap import (  # noqa: E402
 
 
 class SemanticGrantTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import store.store as st
+        st.set_provisioning_allowed(True)   # GRANT runs in an admin request
+        self.addCleanup(st.set_provisioning_allowed, False)
+
     def test_collects_all_supported_physical_table_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)

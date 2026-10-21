@@ -146,6 +146,51 @@ class StorageProvisioningTest(unittest.TestCase):
         self.assertNotIn("CREATE", _sql(cursor))
 
 
+class ConnectionGuardTest(unittest.TestCase):
+    """Backstop: even a forgotten guard cannot send a write to Doris with a
+    read-only caller's credentials."""
+
+    def setUp(self) -> None:
+        st.set_request_credentials("backend_mcp_test", "secret")
+        st.set_provisioning_allowed(False)
+        patcher = patch("store.store.pymysql.connect")
+        self.connect = patcher.start()
+        self.addCleanup(patcher.stop)
+        conn, cursor = MagicMock(), MagicMock()
+        conn.cursor.return_value = cursor
+        self.connect.return_value = conn
+        self.cursor = cursor
+
+    def tearDown(self) -> None:
+        st.set_provisioning_allowed(False)
+
+    def test_write_statements_are_refused(self):
+        cur = st._get_conn().cursor()
+        for sql in (
+            "INSERT INTO x VALUES (1)",
+            "UPDATE x SET a = 1",
+            "DELETE FROM x",
+            "CREATE TABLE x (a int)",
+            "DROP TABLE x",
+            "GRANT SELECT_PRIV ON `dw`.* TO '%'",
+        ):
+            with self.assertRaises(WriteNotAllowed):
+                cur.execute(sql)
+        self.cursor.execute.assert_not_called()
+
+    def test_select_and_use_pass_through(self):
+        cur = st._get_conn().cursor()
+        cur.execute("USE system_mcp")
+        cur.execute("SELECT 1")
+        self.assertEqual(self.cursor.execute.call_count, 2)
+
+    def test_admin_still_writes(self):
+        st.set_provisioning_allowed(True)
+        cur = st._get_conn().cursor()
+        cur.execute("INSERT INTO x VALUES (1)")
+        self.cursor.execute.assert_called_once()
+
+
 class WriteGuardTest(unittest.TestCase):
     """Mutations must refuse to run for a read-only caller, regardless of which
     code path reaches them. This is the structural net for the recurring

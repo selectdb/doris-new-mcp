@@ -364,7 +364,11 @@ def grant_select_on_physical_tables(tables: set[str]) -> None:
     if not quoted_tables:
         raise ValueError("No physical tables found in semantic YAML files")
 
-    from store.store import _get_conn
+    from store.store import WriteNotAllowed, _get_conn, provisioning_allowed
+    if not provisioning_allowed():
+        raise WriteNotAllowed(
+            "Granting semantic table access requires a Doris administrator"
+        )
 
     conn = _get_conn()
     try:
