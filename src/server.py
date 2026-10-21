@@ -1605,7 +1605,13 @@ def create_server(
         request: Request, client_id: str, is_admin: bool, ws: str
     ) -> str:
         from store.store import DorisStore as _DS
-        schema = await asyncio.to_thread(_DS.metadata_schema_status)
+        try:
+            schema = await asyncio.to_thread(_DS.metadata_schema_status)
+        except Exception as exc:
+            # Never let a failed probe break the page (e.g. missing grant on
+            # information_schema); the store reads below still work if they can.
+            logger.warning("Metadata schema probe failed: %s", exc)
+            schema = {"state": "ok", "missing_columns": [], "missing_rows": []}
         if schema["state"] in ("needs_migration", "outdated"):
             if is_admin:
                 detail = (
