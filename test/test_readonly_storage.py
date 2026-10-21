@@ -349,6 +349,39 @@ class SchemaMigrationTest(unittest.TestCase):
             st.DorisStore.migrate_metadata_schema()
 
 
+class QueryPoolGuardTest(unittest.TestCase):
+    """The per-user query pool only ever executes read statements."""
+
+    def test_reads_pass(self):
+        from core.connection import assert_read_only_statement
+        for sql in (
+            "SELECT 1",
+            "  /* hint */ SELECT * FROM dw.orders",
+            "-- c\nSELECT 1",
+            "WITH t AS (SELECT 1) SELECT * FROM t",
+            "SHOW DATABASES",
+            "DESCRIBE dw.orders",
+            "EXPLAIN SELECT 1",
+        ):
+            assert_read_only_statement(sql)
+
+    def test_writes_are_refused(self):
+        from core.connection import assert_read_only_statement
+        for sql in (
+            "INSERT INTO x VALUES (1)",
+            "UPDATE x SET a=1",
+            "DELETE FROM x",
+            "CREATE TABLE x (a int)",
+            "DROP TABLE x",
+            "GRANT SELECT_PRIV ON `dw`.* TO '%'",
+            "/* c */ DELETE FROM x",
+            "",
+            "   ",
+        ):
+            with self.assertRaises(ValueError):
+                assert_read_only_statement(sql)
+
+
 class ProvisioningFlagTest(unittest.TestCase):
     """The admin flag must reach the store from the MCP auth layer."""
 
