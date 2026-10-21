@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from store.store import DorisStore
+from store.store import DorisStore, SemanticStorageNotInitialized
 from store.version import SemanticLayerVersion, VersionTracker
 
 logger = logging.getLogger("doris_new_mcp.watcher")
@@ -251,6 +251,9 @@ class MultiWorkspaceWatcher:
         # Lazy-init guards
         self._initialized: bool = False
 
+        # Set when storage is missing and the caller may not create it.
+        self._storage_error: str = ""
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -262,6 +265,10 @@ class MultiWorkspaceWatcher:
     @property
     def workspaces(self) -> dict[str, WorkspaceState]:
         return self._workspaces
+
+    @property
+    def storage_error(self) -> str:
+        return self._storage_error
 
     def get_workspace(self, name: str) -> WorkspaceState | None:
         return self._workspaces.get(name)
@@ -361,6 +368,13 @@ class MultiWorkspaceWatcher:
                 return None
             try:
                 existing = set(DorisStore.discover_workspaces())
+                self._storage_error = ""
+            except SemanticStorageNotInitialized as e:
+                # Keep the reason: "workspace not found" would send the agent
+                # chasing the wrong problem.
+                self._storage_error = str(e)
+                logger.warning(f"ensure_fresh [{workspace_name}]: {e}")
+                return None
             except Exception:
                 logger.warning(f"ensure_fresh [{workspace_name}]: discover failed")
                 return None

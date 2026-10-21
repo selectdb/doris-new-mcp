@@ -1,0 +1,134 @@
+"""Regression test: ordinary users never trigger DDL on semantic reads.
+
+Non-admin callers hold SELECT but not CREATE. Before this fix, the first
+semantic read of a non-admin user (e.g. list_metrics after a restart) went
+through DorisStore.__init__ / discover_workspaces and issued
+``CREATE DATABASE IF NOT EXISTS system_mcp``, which Doris rejected with
+"Access denied" — even when the database already existed.
+
+Pinned behaviour:
+  * non-admin  -> reads only; missing storage raises SemanticStorageNotInitialized
+  * admin      -> may create the database / tables exactly as before
+
+Run: python test/test_readonly_storage.py
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+import store.store as st  # noqa: E402
+from store.store import SemanticStorageNotInitialized  # noqa: E402
+
+
+def _sql(cursor: MagicMock) -> str:
+    return " ".join(str(call.args[0]) for call in cursor.execute.call_args_list).upper()
+
+
+class StorageProvisioningTest(unittest.TestCase):
+    def setUp(self) -> None:
+        st.set_request_credentials("backend_mcp_test", "secret")
+        st.set_provisioning_allowed(False)
+        st.DorisStore._table_cache.clear()
+
+    def tearDown(self) -> None:
+        st.set_provisioning_allowed(False)
+
+    def _conn(self, *, database_exists=False, tables=()):
+        patcher = patch("store.store.pymysql.connect")
+        connect = patcher.start()
+        self.addCleanup(patcher.stop)
+        conn, cursor = MagicMock(), MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        cursor.fetchone.return_value = ("system_mcp",) if database_exists else None
+        cursor.fetchall.return_value = list(tables)
+        connect.return_value = conn
+        return cursor
+
+    # ── construction ──
+
+    def test_normal_user_construction_runs_no_ddl(self):
+        cursor = self._conn()
+        st.DorisStore(workspace="ws1")
+        self.assertNotIn("CREATE", _sql(cursor))
+
+    def test_admin_construction_still_provisions(self):
+        st.set_provisioning_allowed(True)
+        cursor = self._conn()
+        st.DorisStore(workspace="ws2")
+        self.assertIn("CREATE DATABASE IF NOT EXISTS SYSTEM_MCP", _sql(cursor))
+
+    # ── discovery ──
+
+    def test_normal_user_discovery_of_missing_db_raises_without_ddl(self):
+        cursor = self._conn(database_exists=False)
+        with self.assertRaises(SemanticStorageNotInitialized):
+            st.DorisStore.discover_workspaces()
+        self.assertNotIn("CREATE", _sql(cursor))
+
+    def test_normal_user_discovery_of_existing_db_reads_only(self):
+        cursor = self._conn(database_exists=True, tables=[("active_store_demo",)])
+        self.assertEqual(st.DorisStore.discover_workspaces(), ["demo"])
+        self.assertNotIn("CREATE", _sql(cursor))
+
+    def test_admin_discovery_creates_missing_db(self):
+        st.set_provisioning_allowed(True)
+        cursor = self._conn(database_exists=False)
+        self.assertEqual(st.DorisStore.discover_workspaces(), [])
+        self.assertIn("CREATE DATABASE IF NOT EXISTS SYSTEM_MCP", _sql(cursor))
+
+    # ── read helpers stay DDL-free for normal users ──
+
+    def test_normal_user_reads_never_create_tables(self):
+        cursor = self._conn(database_exists=True)
+        cursor.execute.side_effect = RuntimeError("Unknown table 'active_store_x'")
+        store = st.DorisStore(workspace="ws3")
+        cursor.execute.reset_mock()
+
+        self.assertEqual(store.list_files(), [])
+        self.assertNotIn("CREATE", _sql(cursor))
+
+
+class ProvisioningFlagTest(unittest.TestCase):
+    """The admin flag must reach the store from the MCP auth layer."""
+
+    def tearDown(self) -> None:
+        st.set_provisioning_allowed(False)
+
+    def _verifier(self, user, is_admin):
+        import asyncio
+        from auth.credential_cache import CredentialCache
+        from auth.credential_verifier import CredentialVerifier
+
+        cache = CredentialCache(ttl_seconds=600)
+        cache.add(user, "pw")
+
+        async def verify_fn(u, p):  # pragma: no cover - cache hit
+            return True
+
+        verifier = CredentialVerifier(cache, verify_fn, admin_resolver=lambda u: is_admin)
+
+        async def scenario():
+            token = await verifier.verify_token(f"{user}:pw")
+            return token, st.provisioning_allowed()
+
+        return asyncio.run(scenario())
+
+    def test_admin_token_allows_provisioning(self):
+        token, allowed = self._verifier("admin", True)
+        self.assertIsNotNone(token)
+        self.assertTrue(allowed)
+
+    def test_normal_token_forbids_provisioning(self):
+        token, allowed = self._verifier("backend_mcp_test", False)
+        self.assertIsNotNone(token)
+        self.assertFalse(allowed)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

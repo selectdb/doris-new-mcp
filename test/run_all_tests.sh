@@ -132,6 +132,7 @@ run_offline_unit_tests() {
     run_python_test "$SCRIPT_DIR/test_watcher.py" "Workspace watcher offline unit test" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_semantic_loading.py" "On-demand semantic loading offline unit test" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_workspace_metadata.py" "Semantic workspace metadata offline unit test" || ((FAIL_COUNT += 1))
+    run_python_test "$SCRIPT_DIR/test_readonly_storage.py" "Read-only storage (no DDL on read paths) offline unit test" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_manifest_dims.py" "Metric dimension extraction offline unit test" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_compiler_where.py" "WHERE literal handling offline unit test" || ((FAIL_COUNT += 1))
     run_python_test "$SCRIPT_DIR/test_web_session_cookie.py" "Web session cookie offline unit test" || ((FAIL_COUNT += 1))

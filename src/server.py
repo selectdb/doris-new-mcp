@@ -487,13 +487,19 @@ def create_server(
     from auth.credential_cache import CredentialCache
     from auth.credential_verifier import CredentialVerifier
     _credential_cache = CredentialCache(ttl_seconds=600)
+    # Doris admin role per user, so a credential-cache hit can still tell the
+    # store whether this caller may create missing storage.
+    _admin_roles: dict[str, bool] = {}
 
     async def _async_verify_credentials(user: str, password: str) -> bool:
         """Async wrapper for Doris credential verification."""
         ok, _ = await asyncio.to_thread(_verify_doris_credentials, user, password)
         return ok
 
-    auth_provider = CredentialVerifier(_credential_cache, _async_verify_credentials)
+    auth_provider = CredentialVerifier(
+        _credential_cache, _async_verify_credentials,
+        admin_resolver=lambda user: _admin_roles.get(user, False),
+    )
     logger.info("Auth: CredentialVerifier registered (username:password, 10-min cache)")
 
     # Helper: get store for a workspace (defaults to "example")
@@ -584,6 +590,11 @@ def create_server(
     def _record_login_success(user: str) -> None:
         _login_failures.pop(user, None)
 
+    def _forget_credentials(user: str, password: str) -> None:
+        """Drop a credential the pool rejected, together with its cached role."""
+        _credential_cache.clear(user, password)
+        _admin_roles.pop(user, None)
+
     async def _get_per_user_pool() -> ConnectionPool:
         """Return a per-user connection pool from the request Bearer token.
 
@@ -606,7 +617,7 @@ def create_server(
         password = parts[1] if len(parts) > 1 else ""
         return await pool_manager.get_or_create_local_pool(
             username, password,
-            on_auth_error=lambda: _credential_cache.clear(username, password),
+            on_auth_error=lambda: _forget_credentials(username, password),
         )
 
     async def _acquire_pool(tool_name: str) -> ConnectionPool | str:
@@ -646,9 +657,11 @@ def create_server(
                 charset="utf8mb4", connect_timeout=5,
             )
             is_admin = _doris_user_has_admin_role(conn, user)
+            _admin_roles[user] = is_admin
             _record_login_success(user)
             return True, is_admin
         except Exception:
+            _admin_roles.pop(user, None)
             _record_login_failure(user)
             return False, False
         finally:
@@ -677,8 +690,9 @@ def create_server(
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models or settings."}},
                         status_code=403)
-                from store.store import set_request_credentials
+                from store.store import set_provisioning_allowed, set_request_credentials
                 set_request_credentials(client_id, session.get("doris_password", ""))
+                set_provisioning_allowed(is_admin)
                 await _ensure_semantic_initialized(
                     client_id, session.get("doris_password", "")
                 )
@@ -698,8 +712,9 @@ def create_server(
                     return None, False, JSONResponse(
                         {"success": False, "error": {"code": "PERMISSION_DENIED", "message": "Only users with the Doris admin role can modify semantic models or settings."}},
                         status_code=403)
-                from store.store import set_request_credentials
+                from store.store import set_provisioning_allowed, set_request_credentials
                 set_request_credentials(username, password)
+                set_provisioning_allowed(is_admin)
                 await _ensure_semantic_initialized(username, password)
                 return username, is_admin, None
             return None, False, JSONResponse(
@@ -1051,6 +1066,9 @@ def create_server(
 
     def _semantic_workspace_error(ws, workspace: str) -> str | None:
         if ws is None:
+            storage_error = getattr(multi_watcher, "storage_error", "")
+            if storage_error:
+                return error_response(ErrorCode.SERVICE_NOT_READY, storage_error)
             return error_response(
                 ErrorCode.SERVICE_NOT_READY,
                 f"Semantic workspace '{workspace}' was not found or could not be checked",
