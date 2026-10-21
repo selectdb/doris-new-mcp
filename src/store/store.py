@@ -868,6 +868,7 @@ class DorisStore:
                         (workspace, True, 1, datetime.now(), user),
                     )
                     added.append(workspace)
+                cls._grant_metadata_read(cur)
         finally:
             conn.close()
 
@@ -899,6 +900,16 @@ class DorisStore:
                 "Web UI as an admin and run 'Migrate metadata'. Writes are blocked "
                 "until it succeeds."
             )
+
+    @staticmethod
+    def _grant_metadata_read(cur) -> None:
+        """Make the semantic storage readable for all users.
+
+        Runs as an admin statement; without it a freshly created
+        workspace_metadata table is invisible to ordinary users, and their
+        first semantic read fails with Access denied.
+        """
+        cur.execute(f"GRANT SELECT_PRIV ON `{_DORIS_DB}`.* TO '%'")
 
     def _ensure_tables(self) -> None:
         # Ordinary users hold SELECT but not CREATE. This runs from read paths
@@ -954,6 +965,7 @@ class DorisStore:
                     PROPERTIES ('replication_num' = '1')
                 """)
                 self._get_workspace_metadata_with_cursor(cur)
+                self._grant_metadata_read(cur)
             self._table_cache[key] = True
             cls._schema_state = "ok"
             logger.info(f"Tables ensured for workspace '{self._workspace}': {self._active_table}, {self._staging_table}")

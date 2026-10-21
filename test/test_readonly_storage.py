@@ -67,6 +67,8 @@ class StorageProvisioningTest(unittest.TestCase):
         cursor = self._conn()
         st.DorisStore(workspace="ws2")
         self.assertIn("CREATE DATABASE IF NOT EXISTS SYSTEM_MCP", _sql(cursor))
+        # A newly created metadata table must be readable by ordinary users.
+        self.assertIn("GRANT SELECT_PRIV", _sql(cursor))
 
     # ── discovery ──
 
@@ -137,6 +139,7 @@ class StorageProvisioningTest(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
         # Write path still creates the row when it is missing.
         self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
+        self.assertIn("GRANT SELECT_PRIV", sql)
 
     # ── read helpers stay DDL-free for normal users ──
 
