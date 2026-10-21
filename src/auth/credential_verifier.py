@@ -34,11 +34,20 @@ class CredentialVerifier(TokenVerifier):
         self,
         cache: CredentialCache,
         verify_fn: Callable[[str, str], Awaitable[bool]],
+        admin_resolver: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(required_scopes=[])
         self._cache = cache
         self._verify_fn = verify_fn
+        self._admin_resolver = admin_resolver
         logger.info("CredentialVerifier initialized (10-min credential cache)")
+
+    def _apply_authorization(self, username: str) -> None:
+        """Tell the store layer whether this caller may create storage."""
+        from store.store import set_provisioning_allowed
+
+        allowed = bool(self._admin_resolver(username)) if self._admin_resolver else False
+        set_provisioning_allowed(allowed)
 
     async def verify_token(self, token: str) -> AccessToken | None:
         """Verify a ``username:password`` token.
@@ -61,6 +70,7 @@ class CredentialVerifier(TokenVerifier):
             logger.debug("Credential cache HIT for user '%s'", username)
             from store.store import set_request_credentials
             set_request_credentials(username, password)
+            self._apply_authorization(username)
             return AccessToken(
                 token=token,
                 client_id=username,
@@ -85,6 +95,7 @@ class CredentialVerifier(TokenVerifier):
         logger.info("Doris authentication OK for user '%s' (cached for 10 min)", username)
         from store.store import set_request_credentials
         set_request_credentials(username, password)
+        self._apply_authorization(username)
         return AccessToken(
             token=token,
             client_id=username,

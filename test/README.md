@@ -15,6 +15,7 @@ Generated from [DESIGN.md](../DESIGN.md), [INSTALL.html](../INSTALL.html), and [
 | `test_deps.py` | Runtime dependency guard (imports real modules) |
 | `test_cross_file_deps.py` | Cross-file dependency detection before delete |
 | `test_credential_pass.py` | Request-scoped credential pass-through to the store layer |
+| `test_readonly_storage.py` | Read paths issue no DDL (non-admin users can read models); `ensure_tables()` stays admin-only |
 | `test_watcher.py` | `MultiWorkspaceWatcher.ensure_fresh` cooldown/reload/degradation |
 | `test_web_session_cookie.py` | Web session cookie |
 | `test_session_affinity_proxy_routing.py` | Session affinity proxy routing |

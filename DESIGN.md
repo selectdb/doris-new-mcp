@@ -274,6 +274,13 @@ system_mcp.workspace_metadata           ← workspace 级运行状态
 `workspace_metadata` 与模型表放在同一个 `system_mcp` 管理库中，使所有 MCP
 Server 节点共享同一开关和发布版本，不依赖单机配置或本地缓存。
 
+**存储初始化的权限边界：** 建库建表的 DDL 只对 admin 身份的请求执行——admin
+访问时若库/表缺失会自动补建，写操作（创建/删除工作区、提交 staging、部署 example）
+同样走这条路径。普通用户（通常只有 `SELECT_PRIV`）的读路径只做
+`information_schema` / `SHOW` 查询，缺库时返回
+`Semantic storage is not initialized…` 的明确错误，**不执行任何 DDL**，
+避免把 `Access denied` 打在用户从未请求的 `CREATE DATABASE` 上。
+
 ### 5.4 更新流程
 
 ```
@@ -524,6 +531,7 @@ example 不会自动部署。Admin 可通过 Reload 右侧的专属按钮手动�
 | `stateless_http=True` | 不维护 MCP 会话状态。兼容不保持 session 的客户端（VeloDB 代理、Claude Desktop）。 |
 | Doris 存储 YAML | 模型文件存在 Doris 表中而非文件系统。支持多服务器共享状态部署，无需文件同步。 |
 | 两级存储（active + staging） | 防止错误模型影响线上。强制「先验证再提交」的卡控机制。 |
+| 读路径零 DDL | 普通用户只有 SELECT；模型读取不该以调用者身份建库建表。缺库时返回明确错误，DDL 仅 admin 请求执行。 |
 | 仅编译模式的 `_DorisSqlClientStub` | MetricFlow 需要 SqlClient 做方言渲染，实际查询通过 aiomysql 池以用户身份执行。 |
 | 每用户连接池 | 每个认证用户获得独立 aiomysql 池，保留 Doris 原生用户级别授权。 |
 | 内嵌 HTML 模板 | Web UI 无外部 CDN 依赖，单文件部署，支持代理/VPN 访问。 |

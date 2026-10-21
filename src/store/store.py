@@ -82,6 +82,24 @@ def set_request_credentials(user: str, password: str) -> None:
     _request_creds.set((user, password))
 
 
+# Request-scoped: may this caller create storage that does not exist yet?
+# True only for Doris admin requests; ordinary users must never run DDL.
+_provision_allowed: contextvars.ContextVar[bool] = \
+    contextvars.ContextVar('_doris_store_provision_allowed', default=False)
+
+
+def set_provisioning_allowed(allowed: bool) -> None:
+    _provision_allowed.set(bool(allowed))
+
+
+def provisioning_allowed() -> bool:
+    return bool(_provision_allowed.get())
+
+
+class SemanticStorageNotInitialized(RuntimeError):
+    """Storage is missing and this caller may not create it."""
+
+
 def set_doris_endpoint(host: str, port: int) -> None:
     """Update the Doris FE endpoint from server configuration."""
     global _DORIS_HOST, _DORIS_PORT
@@ -155,17 +173,38 @@ class DorisStore:
 
     @classmethod
     def discover_workspaces(cls) -> list[str]:
-        """Scan system_mcp for all active_store_* tables, return workspace names."""
+        """Scan system_mcp for all active_store_* tables, return workspace names.
+
+        Admins keep the self-initializing behaviour; ordinary users only read
+        (information_schema / SHOW) and get a clear error when the database is
+        missing, instead of a failed CREATE they have no privilege for.
+        """
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DORIS_DB}")
+                if provisioning_allowed():
+                    cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DORIS_DB}")
+                elif not cls._database_exists(cur):
+                    raise SemanticStorageNotInitialized(
+                        f"Semantic storage is not initialized: database "
+                        f"'{_DORIS_DB}' does not exist or is not readable. "
+                        "Ask a Doris administrator to initialize it."
+                    )
                 cur.execute(f"USE {_DORIS_DB}")
                 cur.execute("SHOW TABLES LIKE 'active_store_%'")
                 tables = [r[0] for r in cur.fetchall()]
         finally:
             conn.close()
         return [t[len("active_store_"):] for t in tables]
+
+    @staticmethod
+    def _database_exists(cur) -> bool:
+        cur.execute(
+            "SELECT SCHEMA_NAME FROM information_schema.schemata "
+            "WHERE SCHEMA_NAME = %s",
+            (_DORIS_DB,),
+        )
+        return cur.fetchone() is not None
 
     @classmethod
     def drop_workspace_tables(cls, workspace: str) -> None:
@@ -590,6 +629,12 @@ class DorisStore:
     _table_cache: dict[str, bool] = {}
 
     def _ensure_tables(self) -> None:
+        # Ordinary users hold SELECT but not CREATE. This runs from read paths
+        # too (DorisStore construction, metadata reads), so it must be a no-op
+        # for them: a missing table then surfaces as a query error, never as a
+        # CREATE that fails with Access denied.
+        if not provisioning_allowed():
+            return
         key = self._workspace
         if self._table_cache.get(key):
             return
