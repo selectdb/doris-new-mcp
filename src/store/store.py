@@ -291,7 +291,15 @@ class DorisStore:
             updated_by=str(row[3]) if row[3] is not None else None,
         )
 
-    def _get_workspace_metadata_with_cursor(self, cur) -> WorkspaceMetadata:
+    def _get_workspace_metadata_with_cursor(
+        self, cur, create_missing: bool = True,
+    ) -> WorkspaceMetadata:
+        """Read one workspace's metadata row.
+
+        ``create_missing=False`` is used by read paths: a missing row (legacy or
+        externally created workspace) must not turn a SELECT into an INSERT,
+        because ordinary users have no INSERT privilege.
+        """
         cur.execute(
             f"SELECT semantic_enabled, semantic_version, updated_at, updated_by "
             f"FROM {_WORKSPACE_METADATA_TABLE} WHERE workspace = %s",
@@ -299,6 +307,8 @@ class DorisStore:
         )
         row = cur.fetchone()
         if row is None:
+            if not create_missing:
+                return self._default_metadata()
             user = (_request_creds.get() or ("system", ""))[0]
             now = datetime.now()
             cur.execute(
@@ -316,13 +326,28 @@ class DorisStore:
             )
         return self._metadata_from_row(self._workspace, row)
 
+    def _default_metadata(self) -> WorkspaceMetadata:
+        """State assumed when a workspace has no published metadata row.
+
+        Older/externally created workspaces have tables but no row; they are
+        enabled with version 1 so the version check stays stable. The row is
+        created by the next admin write (toggle, commit, deploy).
+        """
+        return WorkspaceMetadata(
+            workspace=self._workspace,
+            semantic_enabled=True,
+            semantic_version=1,
+            updated_at=None,
+            updated_by=None,
+        )
+
     def get_workspace_metadata(self) -> WorkspaceMetadata:
         self._ensure_tables()
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"USE {_DORIS_DB}")
-                return self._get_workspace_metadata_with_cursor(cur)
+                return self._get_workspace_metadata_with_cursor(cur, create_missing=False)
         finally:
             conn.close()
 

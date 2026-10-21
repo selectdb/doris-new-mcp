@@ -102,6 +102,22 @@ class StorageProvisioningTest(unittest.TestCase):
         ])
         self.assertEqual(st.DorisStore.discover_workspaces(), ["ok"])
 
+    # ── metadata reads never INSERT (legacy workspaces have no row) ──
+
+    def test_metadata_read_without_row_does_not_insert(self):
+        """A workspace whose tables predate workspace_metadata (or was created
+        outside the app) has no row. Reading it must not try to INSERT: ordinary
+        users have no INSERT privilege."""
+        cursor = self._conn(database_exists=True)
+        cursor.fetchone.return_value = None          # no metadata row
+        meta = st.DorisStore(workspace="legacy_ws").get_workspace_metadata()
+
+        self.assertTrue(meta.semantic_enabled)
+        self.assertEqual(meta.semantic_version, 1)
+        sql = _sql(cursor)
+        self.assertIn("SELECT SEMANTIC_ENABLED", sql)
+        self.assertNotIn("INSERT", sql)
+
     # ── the admin example-deploy path may still provision ──
 
     def test_admin_deploy_path_provisions_missing_metadata_table(self):
@@ -112,7 +128,10 @@ class StorageProvisioningTest(unittest.TestCase):
         cursor = self._conn(database_exists=True)
         cursor.fetchone.return_value = None   # no metadata row yet
         st.DorisStore(workspace="deploy_ws").bump_semantic_version()
-        self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", _sql(cursor))
+        sql = _sql(cursor)
+        self.assertIn("CREATE TABLE IF NOT EXISTS WORKSPACE_METADATA", sql)
+        # Write path still creates the row when it is missing.
+        self.assertIn("INSERT INTO WORKSPACE_METADATA", sql)
 
     # ── read helpers stay DDL-free for normal users ──
 
