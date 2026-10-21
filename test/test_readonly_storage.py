@@ -15,6 +15,7 @@ Run: python test/test_readonly_storage.py
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -23,7 +24,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import store.store as st  # noqa: E402
-from store.store import SemanticStorageNotInitialized  # noqa: E402
+from store.store import SemanticStorageNotInitialized, WriteNotAllowed  # noqa: E402
 
 
 def _sql(cursor: MagicMock) -> str:
@@ -143,6 +144,59 @@ class StorageProvisioningTest(unittest.TestCase):
 
         self.assertEqual(store.list_files(), [])
         self.assertNotIn("CREATE", _sql(cursor))
+
+
+class WriteGuardTest(unittest.TestCase):
+    """Mutations must refuse to run for a read-only caller, regardless of which
+    code path reaches them. This is the structural net for the recurring
+    "read path performs a write" bug class."""
+
+    def setUp(self) -> None:
+        st.set_request_credentials("backend_mcp_test", "secret")
+        st.set_provisioning_allowed(False)
+        st.DorisStore._table_cache.clear()
+
+    def tearDown(self) -> None:
+        st.set_provisioning_allowed(False)
+
+    def _store(self):
+        patcher = patch("store.store.pymysql.connect")
+        connect = patcher.start()
+        self.addCleanup(patcher.stop)
+        conn, cursor = MagicMock(), MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        cursor.fetchone.return_value = None
+        cursor.fetchall.return_value = []
+        return st.DorisStore(workspace="guarded_ws"), connect
+
+    def test_every_mutating_method_raises(self):
+        store, connect = self._store()
+        cases = [
+            lambda: store.set_semantic_enabled(True, "x"),
+            lambda: store.bump_semantic_version(),
+            lambda: store.staging_upsert("a.yaml", "x"),
+            lambda: store.staging_delete("a.yaml"),
+            lambda: store.staging_discard(),
+            lambda: store.staging_commit(),
+            lambda: st.DorisStore.drop_workspace_tables("guarded_ws"),
+        ]
+        for call in cases:
+            with self.assertRaises(WriteNotAllowed):
+                call()
+        # Nothing reached Doris at all.
+        connect.assert_not_called()
+
+    def test_reads_emit_no_write_sql(self):
+        store, connect = self._store()
+        cursor = connect.return_value.cursor.return_value.__enter__.return_value
+        store.get_workspace_metadata()
+        store.list_files()
+        store.get_file("a.yaml")
+        store.staging_list()
+        stores = _sql(cursor)
+        for verb in ("INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "GRANT"):
+            # Word boundary: "UPDATED_AT" is a column, not an UPDATE statement.
+            self.assertIsNone(re.search(rf"\b{verb}\b", stores), verb)
 
 
 class ProvisioningFlagTest(unittest.TestCase):

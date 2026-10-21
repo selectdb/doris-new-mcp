@@ -115,6 +115,15 @@ class SemanticStorageNotInitialized(RuntimeError):
     """Storage is missing and this caller may not create it."""
 
 
+class WriteNotAllowed(RuntimeError):
+    """A mutating store method was reached from a read-only request.
+
+    Ordinary Doris users hold SELECT only, so any write on their behalf would
+    fail at Doris with "Access denied". Fail here instead, with a message that
+    points at the programming error rather than the caller's privileges.
+    """
+
+
 def set_doris_endpoint(host: str, port: int) -> None:
     """Update the Doris FE endpoint from server configuration."""
     global _DORIS_HOST, _DORIS_PORT
@@ -240,6 +249,10 @@ class DorisStore:
         Safe to call when tables don't exist (uses IF EXISTS).
         """
         workspace = _validate_workspace_name(workspace)
+        if not provisioning_allowed():
+            raise WriteNotAllowed(
+                "Dropping workspace storage requires a Doris administrator"
+            )
         conn = _get_conn()
         try:
             with conn.cursor() as cur:
@@ -309,6 +322,7 @@ class DorisStore:
         if row is None:
             if not create_missing:
                 return self._default_metadata()
+            self._require_write()
             user = (_request_creds.get() or ("system", ""))[0]
             now = datetime.now()
             cur.execute(
@@ -352,6 +366,7 @@ class DorisStore:
             conn.close()
 
     def set_semantic_enabled(self, enabled: bool, updated_by: str) -> WorkspaceMetadata:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -369,6 +384,7 @@ class DorisStore:
             conn.close()
 
     def bump_semantic_version(self, updated_by: str | None = None) -> WorkspaceMetadata:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -512,6 +528,7 @@ class DorisStore:
         ]
 
     def staging_upsert(self, filename: str, content: str) -> None:
+        self._require_write()
         self._ensure_tables()
         now = datetime.now()
         conn = _get_conn()
@@ -539,6 +556,7 @@ class DorisStore:
         - If file is in active_store → add 'delete' record to staging
         Returns 'removed', 'staged', or 'not_found'.
         """
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         now = datetime.now()
@@ -567,6 +585,7 @@ class DorisStore:
         return result
 
     def staging_discard(self) -> None:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -617,6 +636,7 @@ class DorisStore:
         return StoreState(revision=revision)
 
     def staging_commit(self) -> StoreState:
+        self._require_write()
         self._ensure_tables()
         conn = _get_conn()
         try:
@@ -677,6 +697,18 @@ class DorisStore:
     # ------------------------------------------------------------------
 
     _table_cache: dict[str, bool] = {}
+
+    def _require_write(self) -> None:
+        """Reject mutations unless the current request may provision storage.
+
+        Only admin requests set the flag. Reads must never reach this: if they
+        do, it is a bug in the caller, not a permission problem for the user.
+        """
+        if not provisioning_allowed():
+            raise WriteNotAllowed(
+                f"Workspace '{self._workspace}' storage is read-only for this request; "
+                "mutations require a Doris administrator"
+            )
 
     def _ensure_tables(self) -> None:
         # Ordinary users hold SELECT but not CREATE. This runs from read paths
